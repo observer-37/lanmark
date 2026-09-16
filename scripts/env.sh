@@ -6,6 +6,12 @@ WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export RUSTUP_HOME="$WS/.cache/rustup"
 export CARGO_HOME="$WS/.cache/cargo"
 
+# pnpm v11 store 索引（SQLite）也需要重定向，否则会写 $HOME/.local/share
+export XDG_CACHE_HOME="$WS/.cache"
+export XDG_DATA_HOME="$WS/.cache/data"
+export XDG_CONFIG_HOME="$WS/.cache/config"
+export npm_config_cache="$WS/.cache/npm"
+
 # Temurin JDK 21（Gradle 8.9 不支持 JDK 26）
 jdk="$(ls -d "$WS"/.cache/jdk/jdk-21* 2>/dev/null | head -n1)"
 if [ -n "$jdk" ]; then

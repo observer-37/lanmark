@@ -1,0 +1,306 @@
+import { create } from "zustand";
+import { vault, parentDir, remapPath, type VaultNode, type SearchHit, type PathTitle } from "../lib/vault";
+
+const SAVE_DEBOUNCE_MS = 700;
+const RECENTS_SHOWN = 8;
+const FAVORITES_SHOWN = 8;
+
+interface VaultStore {
+  status: "loading" | "unconfigured" | "ready";
+  vaultPath: string | null;
+  tree: VaultNode[];
+  activePath: string | null;
+  content: string;
+  dirty: boolean;
+  savedAt: number | null;
+  editorMode: "wysiwyg" | "source";
+  renamingPath: string | null;
+  searchQuery: string;
+  searchResults: SearchHit[];
+  recents: PathTitle[];
+  favorites: PathTitle[];
+  error: string | null;
+
+  init: () => Promise<void>;
+  pickVault: (mode: "open" | "create") => Promise<void>;
+  refreshTree: () => Promise<void>;
+  refreshMeta: () => Promise<void>;
+  reindex: () => Promise<void>;
+  openNote: (path: string) => Promise<void>;
+  closeNote: () => void;
+  setContent: (content: string) => void;
+  scheduleSave: () => void;
+  saveNow: () => Promise<void>;
+  setEditorMode: (m: "wysiwyg" | "source") => void;
+  setRenaming: (path: string | null) => void;
+  createNote: (dir: string) => Promise<void>;
+  createFolder: (dir: string) => Promise<void>;
+  commitRename: (path: string, newName: string) => Promise<void>;
+  deleteNode: (path: string) => Promise<void>;
+  moveNode: (path: string, newDir: string) => Promise<void>;
+  toggleFavorite: (path: string) => Promise<void>;
+  doSearch: (q: string) => Promise<void>;
+  clearError: () => void;
+}
+
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+export const useVaultStore = create<VaultStore>((set, get) => ({
+  status: "loading",
+  vaultPath: null,
+  tree: [],
+  activePath: null,
+  content: "",
+  dirty: false,
+  savedAt: null,
+  editorMode: "wysiwyg",
+  renamingPath: null,
+  searchQuery: "",
+  searchResults: [],
+  recents: [],
+  favorites: [],
+  error: null,
+
+  init: async () => {
+    try {
+      let s = await vault.status();
+      // 启动时 Rust 侧异步自动开库，未就绪则短暂重试
+      if (s.configured && !s.open) {
+        for (let i = 0; i < 10; i++) {
+          await new Promise((r) => setTimeout(r, 300));
+          s = await vault.status();
+          if (s.open) break;
+        }
+      }
+      if (s.configured && s.open) {
+        set({ status: "ready", vaultPath: s.path });
+        await get().refreshTree();
+        await get().refreshMeta();
+      } else {
+        set({ status: "unconfigured", vaultPath: null });
+      }
+    } catch (e) {
+      set({ status: "unconfigured", error: String(e) });
+    }
+  },
+
+  pickVault: async (mode) => {
+    try {
+      const path = await vault.pickAndSet(mode);
+      set({ status: "ready", vaultPath: path, activePath: null, content: "", dirty: false });
+      await get().refreshTree();
+      await get().refreshMeta();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  refreshTree: async () => {
+    try {
+      const tree = await vault.tree();
+      set({ tree });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  refreshMeta: async () => {
+    try {
+      const [recents, favorites] = await Promise.all([vault.recents(), vault.favorites()]);
+      set({
+        recents: recents
+          .slice(0, RECENTS_SHOWN)
+          .map(([path, title]) => ({ path, title })),
+        favorites: favorites
+          .slice(0, FAVORITES_SHOWN)
+          .map(([path, title]) => ({ path, title })),
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  reindex: async () => {
+    try {
+      await vault.reindex();
+      await get().refreshTree();
+      await get().refreshMeta();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  openNote: async (path) => {
+    // 切换前先把未保存的旧笔记落盘
+    if (get().dirty && get().activePath) {
+      await get().saveNow();
+    }
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    try {
+      const { content } = await vault.readNote(path);
+      set({ activePath: path, content, dirty: false, savedAt: null, renamingPath: null, searchQuery: "" });
+      await get().refreshMeta();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  closeNote: () => {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    set({ activePath: null, content: "", dirty: false, savedAt: null });
+  },
+
+  setContent: (content) => {
+    const { dirty } = get();
+    if (content === get().content) return;
+    set({ content, dirty: true });
+    if (!dirty) void get().scheduleSave();
+  },
+
+  scheduleSave: () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      void get().saveNow();
+    }, SAVE_DEBOUNCE_MS);
+  },
+
+  saveNow: async () => {
+    const { activePath, content, dirty } = get();
+    if (!activePath || !dirty) return;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    try {
+      await vault.writeNote(activePath, content);
+      set({ dirty: false, savedAt: Date.now() });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  setEditorMode: (m) => {
+    if (m === "wysiwyg" && get().editorMode === "source") {
+      // 从源码切回：内容已是最新，直接重建编辑器
+      set({ editorMode: m });
+      return;
+    }
+    set({ editorMode: m });
+  },
+
+  setRenaming: (path) => set({ renamingPath: path }),
+
+  createNote: async (dir) => {
+    try {
+      const node = await vault.createNote(dir, "未命名");
+      await get().refreshTree();
+      await get().openNote(node.path);
+      set({ renamingPath: node.path });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  createFolder: async (dir) => {
+    try {
+      await vault.createFolder(dir, "新建文件夹");
+      await get().refreshTree();
+      const fresh = await vault.tree();
+      const created = fresh.find((n) => n.kind === "folder" && parentDir(n.path) === dir && n.name.startsWith("新建文件夹"));
+      if (created) set({ renamingPath: created.path });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  commitRename: async (path, newName) => {
+    set({ renamingPath: null });
+    if (!newName.trim() || newName.trim() === get().tree.find((n) => n.path === path)?.name) {
+      return;
+    }
+    try {
+      const node = get().tree.find((n) => n.path === path);
+      const isNote = node?.kind === "note";
+      // 笔记默认不带 .md 提交（Rust 侧保留原扩展名）
+      const submit = isNote && newName.endsWith(".md") ? newName.slice(0, -3) : newName;
+      const newPath = await vault.rename(path, submit);
+      if (newPath !== path) {
+        const tree = await vault.tree();
+        set((s) => ({
+          activePath: remapPath(s.activePath, path, newPath),
+          tree,
+        }));
+      } else {
+        await get().refreshTree();
+      }
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  deleteNode: async (path) => {
+    const s = get();
+    const containsActive =
+      s.activePath === path || (s.activePath ?? "").startsWith(path + "/");
+    if (containsActive) {
+      if (!window.confirm("该笔记（或其所在文件夹）包含当前打开的笔记，删除前将先保存。确定删除？")) {
+        return;
+      }
+      await s.saveNow();
+      set({ activePath: null, content: "", dirty: false });
+    } else {
+      if (!window.confirm(`确定删除「${path.split("/").pop()}」？（移入回收站）`)) {
+        return;
+      }
+    }
+    try {
+      await vault.remove(path);
+      await get().refreshTree();
+      await get().refreshMeta();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  moveNode: async (path, newDir) => {
+    try {
+      const newPath = await vault.move(path, newDir);
+      set((s) => ({ activePath: remapPath(s.activePath, path, newPath) }));
+      await get().refreshTree();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  toggleFavorite: async (path) => {
+    try {
+      await vault.toggleFavorite(path);
+      await get().refreshMeta();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  doSearch: async (q) => {
+    set({ searchQuery: q });
+    if (!q.trim()) {
+      set({ searchResults: [] });
+      return;
+    }
+    try {
+      const results = await vault.search(q);
+      set({ searchResults: results });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  clearError: () => set({ error: null }),
+}));

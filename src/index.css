@@ -1,1 +1,44 @@
 @import "tailwindcss";
+@import "@milkdown/crepe/theme/common/style.css";
+@import "@milkdown/crepe/theme/frame-dark.css";
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* ---- Milkdown 编辑器宿主 ---- */
+.editor-host {
+  height: 100%;
+  overflow-y: auto;
+  padding-bottom: 4rem;
+}
+
+.editor-host .milkdown {
+  height: auto;
+  min-height: 100%;
+  max-width: 50rem;
+  margin: 0 auto;
+}
+
+/* ---- CodeMirror 源码模式（暗色适配） ---- */
+.cm-editor {
+  height: 100%;
+  font-size: 13.5px;
+  background: #101012 !important;
+  color: #e4e4e7;
+}
+
+.cm-editor .cm-scroller {
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+.cm-editor .cm-gutters {
+  background: #131316;
+  color: #52525b;
+}
+
+.cm-editor.cm-focused {
+  outline: none;
+}
