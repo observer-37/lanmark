@@ -13,17 +13,36 @@ Tauri 2 (Rust core) + React 19 + TypeScript + Tailwind CSS v4 + Zustand
 | [docs/01-可行性评估与需求确认.md](docs/01-可行性评估与需求确认.md) | 可行性、风险、已确认需求 |
 | [docs/02-技术选型与工程路线.md](docs/02-技术选型与工程路线.md) | 选型论证、架构、同步协议、里程碑 |
 | [docs/03-M0-环境与构建指南.md](docs/03-M0-环境与构建指南.md) | 本机开发环境、构建、Android 安装 |
+| [docs/04-M1-数据与组织模型.md](docs/04-M1-数据与组织模型.md) | vault/目录树/编辑器/搜索设计、实现决策与验证记录 |
+
+## 快速开始（桌面端）
+
+```bash
+pnpm install
+pnpm tauri dev            # 开发调试（热重载）
+
+# 或运行 release 原生二进制（本机 AppImage 有 Intel Arc 兼容性问题，用原生启动器）
+pnpm tauri build --no-bundle
+scripts/lanmark-desktop.sh
+```
+
+首次启动选择笔记库目录。想快速体验完整功能，可先生成一个演示库：
+
+```bash
+scripts/make-demo-vault.sh    # → ~/lanmark-demo-vault（中文笔记/图片/frontmatter + 验收清单）
+```
+然后在首启页「打开现有笔记库」指向它，按「欢迎使用 Lanmark.md」里的 6 步清单走一遍。
 
 ## 开发
 
 ```bash
 pnpm install
 
-# 桌面端开发调试（热重载）
-pnpm tauri dev
-
 # 前端构建 + 类型检查
 pnpm build
+
+# 前端测试（往返保真 / 路径换算 / 纯函数）
+pnpm test
 
 # Rust 侧检查与测试
 cd src-tauri && cargo check && cargo test

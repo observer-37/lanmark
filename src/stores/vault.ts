@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { vault, parentDir, remapPath, type VaultNode, type SearchHit, type PathTitle } from "../lib/vault";
+import { vault, remapPath, type VaultNode, type SearchHit, type PathTitle } from "../lib/vault";
 
 const SAVE_DEBOUNCE_MS = 700;
 const RECENTS_SHOWN = 8;
@@ -30,7 +30,7 @@ interface VaultStore {
   closeNote: () => Promise<void>;
   setContent: (content: string) => void;
   scheduleSave: () => void;
-  saveNow: () => Promise<void>;
+  saveNow: () => Promise<boolean>;
   setEditorMode: (m: "wysiwyg" | "source") => void;
   setRenaming: (path: string | null) => void;
   createNote: (dir: string) => Promise<void>;
@@ -180,7 +180,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   saveNow: async () => {
     const { activePath, content, dirty } = get();
-    if (!activePath || !dirty) return;
+    if (!activePath || !dirty) return true;
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
@@ -188,8 +188,10 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     try {
       await vault.writeNote(activePath, content);
       set({ dirty: false, savedAt: Date.now() });
+      return true;
     } catch (e) {
       set({ error: String(e) });
+      return false;
     }
   },
 
@@ -216,12 +218,13 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   createFolder: async (dir) => {
+    const before = new Set(get().tree.map((n) => n.path));
     try {
       await vault.createFolder(dir, "新建文件夹");
-      await get().refreshTree();
       const fresh = await vault.tree();
-      const created = fresh.find((n) => n.kind === "folder" && parentDir(n.path) === dir && n.name.startsWith("新建文件夹"));
-      if (created) set({ renamingPath: created.path });
+      // 用前后快照差集定位新建项（startsWith 匹配会误中旧的「新建文件夹」）
+      const created = fresh.find((n) => n.kind === "folder" && !before.has(n.path));
+      set({ tree: fresh, ...(created ? { renamingPath: created.path } : {}) });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -260,7 +263,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       if (!window.confirm("该笔记（或其所在文件夹）包含当前打开的笔记，删除前将先保存。确定删除？")) {
         return;
       }
-      await s.saveNow();
+      // 保存失败则中止删除（未保存编辑不丢铁律）
+      if (!(await s.saveNow())) return;
       set({ activePath: null, content: "", dirty: false });
     } else {
       if (!window.confirm(`确定删除「${path.split("/").pop()}」？（移入回收站）`)) {
