@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Crepe, CrepeFeature } from "@milkdown/crepe";
+import { editorViewCtx } from "@milkdown/kit/core";
 import { insertImageCommand } from "@milkdown/kit/preset/commonmark";
 import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
@@ -7,13 +8,22 @@ import { markdown } from "@codemirror/lang-markdown";
 import { useVaultStore } from "../stores/vault";
 import { uploadFile } from "../lib/image";
 import { splitFrontmatter, joinFrontmatter } from "../lib/frontmatter";
+import {
+  isExternal,
+  resolveFrom,
+  toVaultUrl,
+  vaultUrlsToRelative,
+} from "../lib/vault-url";
+import { parentDir } from "../lib/vault";
 
 /** WYSIWYG 编辑器宿主（Crepe）：切换笔记/模式时整体重建，避免状态残留 */
 function MilkdownHost({
   content,
+  notePath,
   onChange,
 }: {
   content: string;
+  notePath: string;
   onChange: (md: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -27,6 +37,7 @@ function MilkdownHost({
     host.innerHTML = "";
     // frontmatter 不进编辑器（CommonMark 会破坏 --- ），保存时原样回填
     const { fm, body } = splitFrontmatter(content);
+    const baseDir = parentDir(notePath);
     (async () => {
       crepe = new Crepe({
         root: host,
@@ -50,7 +61,9 @@ function MilkdownHost({
         },
       });
       crepe.on((listener) => {
-        listener.markdownUpdated((_ctx, md) => onChange(joinFrontmatter(fm, md)));
+        listener.markdownUpdated((_ctx, md) =>
+          onChange(joinFrontmatter(fm, vaultUrlsToRelative(md, baseDir))),
+        );
       });
       await crepe.create();
       if (cancelled) {
@@ -58,14 +71,34 @@ function MilkdownHost({
         return;
       }
 
-      // 图片落盘并插入（粘贴 / 拖入共用）
+      // 图片显示：文档树里相对 src → vault 协议 URL（仅改显示，不改源文件）
+      const view = crepe.editor.action((ctx) => ctx.get(editorViewCtx));
+      const tr = view.state.tr;
+      let changed = false;
+      view.state.doc.descendants((node, pos) => {
+        if (node.type.name === "image") {
+          const src = (node.attrs.src as string) ?? "";
+          if (src && !isExternal(src)) {
+            const vaultRel = resolveFrom(baseDir, src);
+            const url = toVaultUrl(vaultRel);
+            if (url !== src) {
+              tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: url });
+              changed = true;
+            }
+          }
+        }
+      });
+      if (changed) view.dispatch(tr);
+
+      // 图片落盘并插入（粘贴 / 拖入共用）：插入 vault 协议 URL（显示用），
+      // 保存时 stripVaultPrefix 会还原为相对引用
       const insertFiles = async (files: File[]) => {
         if (!crepe) return;
         for (const f of files) {
           try {
-            const rel = await uploadFile(f);
+            const assetRel = await uploadFile(f);
             const alt = f.name.replace(/\.[^.]+$/, "");
-            insertImageCommand.run({ src: rel, alt });
+            insertImageCommand.run({ src: toVaultUrl(assetRel), alt });
           } catch (err) {
             void useVaultStore.setState({ error: String(err) });
           }
@@ -213,6 +246,7 @@ export function EditorPane() {
           <MilkdownHost
             key={`${activePath}|wysiwyg`}
             content={content}
+            notePath={activePath}
             onChange={(md) => {
               setContent(md);
               scheduleSave();

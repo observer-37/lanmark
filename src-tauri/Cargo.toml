@@ -26,6 +26,8 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.11.0"
 tauri-plugin-dialog = "2.7.3"
 base64 = "0.23.1"
+tauri-plugin-log = "2.9.1"
+log = "0.4.34"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

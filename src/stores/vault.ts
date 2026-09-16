@@ -26,7 +26,7 @@ interface VaultStore {
   refreshTree: () => Promise<void>;
   refreshMeta: () => Promise<void>;
   reindex: () => Promise<void>;
-  openNote: (path: string) => Promise<void>;
+  openNote: (path: string, silent?: boolean) => Promise<void>;
   closeNote: () => void;
   setContent: (content: string) => void;
   scheduleSave: () => void;
@@ -76,6 +76,9 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         set({ status: "ready", vaultPath: s.path });
         await get().refreshTree();
         await get().refreshMeta();
+        // 恢复上次打开的笔记（文件已被删除等异常静默降级）
+        const first = get().recents[0];
+        if (first) await get().openNote(first.path, true);
       } else {
         set({ status: "unconfigured", vaultPath: null });
       }
@@ -130,7 +133,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     }
   },
 
-  openNote: async (path) => {
+  openNote: async (path, silent = false) => {
     // 切换前先把未保存的旧笔记落盘
     if (get().dirty && get().activePath) {
       await get().saveNow();
@@ -144,7 +147,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       set({ activePath: path, content, dirty: false, savedAt: null, renamingPath: null, searchQuery: "" });
       await get().refreshMeta();
     } catch (e) {
-      set({ error: String(e) });
+      if (!silent) set({ error: String(e) });
     }
   },
 

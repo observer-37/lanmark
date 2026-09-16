@@ -2,6 +2,7 @@ mod bridge;
 mod commands;
 mod db;
 mod fs_ops;
+mod protocol;
 mod sanitize;
 mod vault;
 
@@ -23,10 +24,35 @@ fn ping(app: tauri::AppHandle, message: String) -> Result<bridge::EchoPayload, S
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let state = Arc::new(vault::AppState::default());
+    let protocol_state = Arc::clone(&state);
     tauri::Builder::default()
+        // vault:// 协议：笔记内相对路径（图片等）→ vault 内真实文件
+        .register_asynchronous_uri_scheme_protocol("vault", move |_ctx, request, responder| {
+            let state = Arc::clone(&protocol_state);
+            let path = request.uri().path().to_string();
+            tauri::async_runtime::spawn(async move {
+                let file = tauri::async_runtime::spawn_blocking(move || protocol::resolve(&state, &path))
+                    .await
+                    .ok()
+                    .flatten();
+                responder.respond(protocol::respond(file));
+            });
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(Arc::new(AppState::default()))
+        // 日志：stdout（无头 E2E / 终端可见 WebView console）+ 日志文件
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("lanmark".to_string()),
+                    }),
+                ])
+                .build(),
+        )
+        .manage(state.clone())
         // 启动时自动打开上次配置的 vault（重索引 + 恢复 DB）
         .setup(|app| {
             let handle = app.handle().clone();
