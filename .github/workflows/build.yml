@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
   workflow_dispatch:
 
@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   desktop-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -87,13 +87,12 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Resolve NDK path
-        run: echo "NDK_HOME=$(ls -d $ANDROID_HOME/ndk/* | head -n1)" >> "$GITHUB_ENV"
+      - name: Resolve NDK path (取最高版本)
+        run: echo "NDK_HOME=$(ls -d $ANDROID_HOME/ndk/* | sort -V | tail -n1)" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile
-      - name: Generate Android project (first time; commit later if customized)
-        run: pnpm tauri android init
-      - name: Build APK (arm64)
-        run: pnpm tauri android build --apk --target aarch64
+      # gen/android 已提交（含 buildToolsVersion 钉 34.0.0 / 腾讯 gradle 镜像定制），无需再 init
+      - name: Build debug APK (arm64, debug 签名可直接安装)
+        run: pnpm tauri android build --debug --apk --target aarch64
       - uses: actions/upload-artifact@v4
         with:
           name: lanmark-android-apk
