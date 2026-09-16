@@ -41,10 +41,16 @@ function semantic(md: string): string {
   return normalize(md)
     .replace(/^( *)\* /gm, "$1- ") // 行首无序列表符号 * → -
     .replace(/^[*_]{3,}\s*$/gm, "---") // hr: *** / ___ → ---
-    .replace(/^\|[\s\-|]+\|\s*$/gm, (line) => {
-      // 表格分隔行 → 规范形式 | --- | --- |
-      const cols = line.split("|").slice(1, -1).length;
-      return "| " + Array(cols).fill("---").join(" | ") + " |";
+    .replace(/^\|.*\|\s*$/gm, (line) => {
+      // 表格行：单元格统一 trim（消除列宽填充），分隔行 ---/-- 归一
+      const cells = line
+        .slice(1, -1)
+        .split("|")
+        .map((c) => {
+          const t = c.trim();
+          return /^-+$/.test(t) ? "---" : t;
+        });
+      return "| " + cells.join(" | ") + " |";
     });
 }
 
@@ -139,5 +145,25 @@ describe("Milkdown 往返保真（M1 决策门）", () => {
     const { fm, body } = splitFrontmatter(md);
     expect(fm).toBe("");
     expect(body).toBe(md);
+  });
+
+  it("长文档（1500 行混合内容）往返不丢失结构", async () => {
+    const parts: string[] = ["# 长文档", ""];
+    for (let i = 0; i < 500; i++) {
+      parts.push(`## 第 ${i} 节`, "", `这是第 ${i} 节的正文，含 **加粗** 与 \`代码\`。`, "", `- 要点 ${i}`, `  - 子要点 ${i}`, "");
+      if (i % 50 === 0) {
+        parts.push("| 列A | 列B |", "| --- | --- |", `| 值${i} | x |`, "");
+      }
+    }
+    const md = parts.join("\n");
+    expect(md.split("\n").length).toBeGreaterThan(1500);
+
+    const t0 = Date.now();
+    const out = await roundtrip(md);
+    const ms = Date.now() - t0;
+
+    expect(semantic(out)).toBe(semantic(md));
+    // 性能护栏：1500 行往返应在合理时间内完成
+    expect(ms).toBeLessThan(15000);
   });
 });

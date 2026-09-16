@@ -1,7 +1,8 @@
-//! Tauri 命令层：薄封装，业务在 fs_ops / db / vault 模块。
+//! Tauri 命令层：`xxx` 是 3 行的命令封装（IPC 入口），`xxx_op` 是纯逻辑
+//! （接收 &Arc<AppState>，可被集成测试与 M2/M3 的同步引擎直接复用）。
 //! 约定：所有路径参数均为 vault 相对路径（'/' 分隔）；未打开 vault 时返回错误。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::Connection;
@@ -14,10 +15,7 @@ use crate::vault::{self, AppState, AppConfig};
 
 pub type CmdResult<T> = Result<T, String>;
 
-fn with_db<T>(
-    state: &Arc<AppState>,
-    f: impl FnOnce(&Connection) -> CmdResult<T>,
-) -> CmdResult<T> {
+fn with_db<T>(state: &Arc<AppState>, f: impl FnOnce(&Connection) -> CmdResult<T>) -> CmdResult<T> {
     let guard = state.db.lock().map_err(|_| "DB 锁中毒")?;
     let conn = guard.as_ref().ok_or("尚未打开 vault")?;
     f(conn)
@@ -50,7 +48,11 @@ pub fn vault_status(app: tauri::AppHandle, state: State<Arc<AppState>>) -> CmdRe
 
 /// 打开（或创建）vault：文件夹选择对话框 → 校验/初始化 → 写配置 → 开库 → 重索引。
 #[tauri::command]
-pub fn vault_pick_and_set(app: tauri::AppHandle, state: State<Arc<AppState>>, mode: String) -> CmdResult<String> {
+pub fn vault_pick_and_set(
+    app: tauri::AppHandle,
+    state: State<Arc<AppState>>,
+    mode: String,
+) -> CmdResult<String> {
     use tauri_plugin_dialog::DialogExt;
 
     let picked = app
@@ -58,17 +60,23 @@ pub fn vault_pick_and_set(app: tauri::AppHandle, state: State<Arc<AppState>>, mo
         .file()
         .blocking_pick_folder()
         .ok_or("已取消选择")?;
-    let path: PathBuf = picked
-        .into_path()
-        .map_err(|e| format!("路径无效: {e}"))?;
+    let path: PathBuf = picked.into_path().map_err(|e| format!("路径无效: {e}"))?;
     if !path.is_dir() {
         return Err("所选路径不是目录".into());
     }
 
-    match mode.as_str() {
+    pick_and_set_op(&state, &path, &mode)?;
+    let cfg = AppConfig { vault_path: Some(path.to_string_lossy().to_string()) };
+    vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// 纯逻辑：校验目录 → 开库（对话框与配置持久化由上层负责）
+pub fn pick_and_set_op(state: &Arc<AppState>, path: &Path, mode: &str) -> CmdResult<()> {
+    match mode {
         "create" => {
             // 允许空目录；若目录里已有笔记则拒绝，避免误吞
-            let has_notes = std::fs::read_dir(&path)
+            let has_notes = std::fs::read_dir(path)
                 .map(|rd| {
                     rd.filter_map(|e| e.ok())
                         .any(|e| e.file_name().to_string_lossy().ends_with(".md"))
@@ -81,25 +89,25 @@ pub fn vault_pick_and_set(app: tauri::AppHandle, state: State<Arc<AppState>>, mo
         "open" => {}
         _ => return Err(format!("未知模式: {mode}")),
     }
-
-    open_vault_at(&state, &path)?;
-    let cfg = AppConfig { vault_path: Some(path.to_string_lossy().to_string()) };
-    vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
-    Ok(path.to_string_lossy().to_string())
+    open_vault_at(state, path)
 }
 
 /// 直接按路径打开 vault（设置页 / 测试用）
 #[tauri::command]
 pub fn vault_open_path(state: State<Arc<AppState>>, path: String) -> CmdResult<String> {
+    vault_open_path_op(&state, path)
+}
+
+pub fn vault_open_path_op(state: &Arc<AppState>, path: String) -> CmdResult<String> {
     let p = PathBuf::from(&path);
     if !p.is_dir() {
         return Err(format!("目录不存在: {path}"));
     }
-    open_vault_at(&state, &p)?;
+    open_vault_at(state, &p)?;
     Ok(path)
 }
 
-pub fn open_vault_at(state: &Arc<AppState>, path: &PathBuf) -> CmdResult<()> {
+pub fn open_vault_at(state: &Arc<AppState>, path: &Path) -> CmdResult<()> {
     fs_ops::ensure_layout(path).map_err(|e| format!("初始化 vault 失败: {e}"))?;
     let db_path = path.join(fs_ops::META_DIR).join("lanmark.db");
     let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {e}"))?;
@@ -109,33 +117,26 @@ pub fn open_vault_at(state: &Arc<AppState>, path: &PathBuf) -> CmdResult<()> {
         let mut vg = state.vault.lock().map_err(|_| "锁中毒")?;
         let mut dg = state.db.lock().map_err(|_| "锁中毒")?;
         fs_ops::reindex(path, &conn).map_err(|e| format!("重索引失败: {e}"))?;
-        *vg = Some(path.clone());
+        *vg = Some(path.to_path_buf());
         *dg = Some(conn);
     }
     Ok(())
 }
 
-#[tauri::command]
-pub fn reindex_vault(state: State<Arc<AppState>>) -> CmdResult<usize> {
-    with_vault(&state, |vault| {
-        with_db(&state, |conn| {
-            fs_ops::reindex(vault, conn).map_err(|e| e.to_string())
-        })
-    })
+// ---------- 纯逻辑（xxx_op） ----------
+
+pub fn reindex_vault_op(state: &Arc<AppState>) -> CmdResult<usize> {
+    with_vault(state, |vault| with_db(state, |conn| fs_ops::reindex(vault, conn).map_err(|e| e.to_string())))
 }
 
-#[tauri::command]
-pub fn tree_list(state: State<Arc<AppState>>) -> CmdResult<Vec<Node>> {
-    with_vault(&state, |vault| {
-        fs_ops::list_tree(vault).map_err(|e| e.to_string())
-    })
+pub fn tree_list_op(state: &Arc<AppState>) -> CmdResult<Vec<Node>> {
+    with_vault(state, |vault| fs_ops::list_tree(vault).map_err(|e| e.to_string()))
 }
 
-#[tauri::command]
-pub fn note_create(state: State<Arc<AppState>>, dir: String, name: String) -> CmdResult<Node> {
-    with_vault(&state, |vault| {
-        with_db(&state, |conn| {
-            let node = fs_ops::create_note(vault, &dir, &name).map_err(|e| e.to_string())?;
+pub fn note_create_op(state: &Arc<AppState>, dir: &str, name: &str) -> CmdResult<Node> {
+    with_vault(state, |vault| {
+        with_db(state, |conn| {
+            let node = fs_ops::create_note(vault, dir, name).map_err(|e| e.to_string())?;
             db::upsert_file(conn, &node.path, node.title.as_deref().unwrap_or(""), "", fs_ops::now_ms(), "", true)
                 .map_err(|e| e.to_string())?;
             Ok(node)
@@ -143,38 +144,20 @@ pub fn note_create(state: State<Arc<AppState>>, dir: String, name: String) -> Cm
     })
 }
 
-#[tauri::command]
-pub fn folder_create(state: State<Arc<AppState>>, dir: String, name: String) -> CmdResult<Node> {
-    with_vault(&state, |vault| {
-        fs_ops::create_folder(vault, &dir, &name).map_err(|e| e.to_string())
-    })
+pub fn folder_create_op(state: &Arc<AppState>, dir: &str, name: &str) -> CmdResult<Node> {
+    with_vault(state, |vault| fs_ops::create_folder(vault, dir, name).map_err(|e| e.to_string()))
 }
 
-#[tauri::command]
-pub fn entry_rename(state: State<Arc<AppState>>, path: String, new_name: String) -> CmdResult<String> {
-    with_vault(&state, |vault| {
-        with_db(&state, |conn| {
-            fs_ops::rename_entry(vault, &path, &new_name, conn).map_err(|e| e.to_string())
-        })
-    })
+pub fn entry_rename_op(state: &Arc<AppState>, path: &str, new_name: &str) -> CmdResult<String> {
+    with_vault(state, |vault| with_db(state, |conn| fs_ops::rename_entry(vault, path, new_name, conn).map_err(|e| e.to_string())))
 }
 
-#[tauri::command]
-pub fn entry_move(state: State<Arc<AppState>>, path: String, new_dir: String) -> CmdResult<String> {
-    with_vault(&state, |vault| {
-        with_db(&state, |conn| {
-            fs_ops::move_entry(vault, &path, &new_dir, conn).map_err(|e| e.to_string())
-        })
-    })
+pub fn entry_move_op(state: &Arc<AppState>, path: &str, new_dir: &str) -> CmdResult<String> {
+    with_vault(state, |vault| with_db(state, |conn| fs_ops::move_entry(vault, path, new_dir, conn).map_err(|e| e.to_string())))
 }
 
-#[tauri::command]
-pub fn entry_delete(state: State<Arc<AppState>>, path: String) -> CmdResult<String> {
-    with_vault(&state, |vault| {
-        with_db(&state, |conn| {
-            fs_ops::delete_entry(vault, &path, conn).map_err(|e| e.to_string())
-        })
-    })
+pub fn entry_delete_op(state: &Arc<AppState>, path: &str) -> CmdResult<String> {
+    with_vault(state, |vault| with_db(state, |conn| fs_ops::delete_entry(vault, path, conn).map_err(|e| e.to_string())))
 }
 
 #[derive(Serialize)]
@@ -185,13 +168,12 @@ pub struct NoteContent {
 }
 
 /// 读取笔记内容，同时记入「最近」
-#[tauri::command]
-pub fn note_read(state: State<Arc<AppState>>, path: String) -> CmdResult<NoteContent> {
-    with_vault(&state, |vault| {
-        let content = fs_ops::read_note(vault, &path).map_err(|e| e.to_string())?;
-        with_db(&state, |conn| {
-            db::record_recent(conn, &path, fs_ops::now_ms(), 50).map_err(|e| e.to_string())?;
-            let title = fs_ops::title_from_stem(path.rsplit('/').next().unwrap_or(&path));
+pub fn note_read_op(state: &Arc<AppState>, path: &str) -> CmdResult<NoteContent> {
+    with_vault(state, |vault| {
+        let content = fs_ops::read_note(vault, path).map_err(|e| e.to_string())?;
+        with_db(state, |conn| {
+            db::record_recent(conn, path, fs_ops::now_ms(), 50).map_err(|e| e.to_string())?;
+            let title = fs_ops::title_from_stem(path.rsplit('/').next().unwrap_or(path));
             Ok(NoteContent { content, title })
         })
     })
@@ -204,12 +186,10 @@ pub struct WriteResult {
     pub hash: String,
 }
 
-#[tauri::command]
-pub fn note_write(state: State<Arc<AppState>>, path: String, content: String) -> CmdResult<WriteResult> {
-    with_vault(&state, |vault| {
-        with_db(&state, |conn| {
-            let (mtime_ms, hash) =
-                fs_ops::write_note(vault, &path, &content, conn).map_err(|e| e.to_string())?;
+pub fn note_write_op(state: &Arc<AppState>, path: &str, content: &str) -> CmdResult<WriteResult> {
+    with_vault(state, |vault| {
+        with_db(state, |conn| {
+            let (mtime_ms, hash) = fs_ops::write_note(vault, path, content, conn).map_err(|e| e.to_string())?;
             Ok(WriteResult { mtime_ms, hash })
         })
     })
@@ -223,10 +203,9 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-#[tauri::command]
-pub fn search(state: State<Arc<AppState>>, query: String) -> CmdResult<Vec<SearchHit>> {
-    with_db(&state, |conn| {
-        Ok(db::search(conn, &query, 50)
+pub fn search_op(state: &Arc<AppState>, query: &str) -> CmdResult<Vec<SearchHit>> {
+    with_db(state, |conn| {
+        Ok(db::search(conn, query, 50)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|h| SearchHit { path: h.path, title: h.title, snippet: h.snippet })
@@ -234,32 +213,233 @@ pub fn search(state: State<Arc<AppState>>, query: String) -> CmdResult<Vec<Searc
     })
 }
 
+pub fn recents_list_op(state: &Arc<AppState>) -> CmdResult<Vec<(String, String)>> {
+    with_db(state, |conn| db::list_recents(conn, 20).map_err(|e| e.to_string()))
+}
+
+pub fn favorites_list_op(state: &Arc<AppState>) -> CmdResult<Vec<(String, String)>> {
+    with_db(state, |conn| db::list_favorites(conn).map_err(|e| e.to_string()))
+}
+
+/// 返回切换后的状态（true=已收藏）
+pub fn favorite_toggle_op(state: &Arc<AppState>, path: &str) -> CmdResult<bool> {
+    with_db(state, |conn| db::favorite_toggle(conn, path, fs_ops::now_ms()).map_err(|e| e.to_string()))
+}
+
+pub fn asset_save_op(state: &Arc<AppState>, data_base64: &str, ext: &str) -> CmdResult<String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64)
+        .map_err(|e| format!("base64 解码失败: {e}"))?;
+    with_vault(state, |vault| fs_ops::save_asset(vault, &bytes, ext).map_err(|e| e.to_string()))
+}
+
+// ---------- IPC 封装（3 行一层） ----------
+
+#[tauri::command]
+pub fn reindex_vault(state: State<Arc<AppState>>) -> CmdResult<usize> {
+    reindex_vault_op(state.inner())
+}
+
+#[tauri::command]
+pub fn tree_list(state: State<Arc<AppState>>) -> CmdResult<Vec<Node>> {
+    tree_list_op(state.inner())
+}
+
+#[tauri::command]
+pub fn note_create(state: State<Arc<AppState>>, dir: String, name: String) -> CmdResult<Node> {
+    note_create_op(state.inner(), &dir, &name)
+}
+
+#[tauri::command]
+pub fn folder_create(state: State<Arc<AppState>>, dir: String, name: String) -> CmdResult<Node> {
+    folder_create_op(state.inner(), &dir, &name)
+}
+
+#[tauri::command]
+pub fn entry_rename(state: State<Arc<AppState>>, path: String, new_name: String) -> CmdResult<String> {
+    entry_rename_op(state.inner(), &path, &new_name)
+}
+
+#[tauri::command]
+pub fn entry_move(state: State<Arc<AppState>>, path: String, new_dir: String) -> CmdResult<String> {
+    entry_move_op(state.inner(), &path, &new_dir)
+}
+
+#[tauri::command]
+pub fn entry_delete(state: State<Arc<AppState>>, path: String) -> CmdResult<String> {
+    entry_delete_op(state.inner(), &path)
+}
+
+#[tauri::command]
+pub fn note_read(state: State<Arc<AppState>>, path: String) -> CmdResult<NoteContent> {
+    note_read_op(state.inner(), &path)
+}
+
+#[tauri::command]
+pub fn note_write(state: State<Arc<AppState>>, path: String, content: String) -> CmdResult<WriteResult> {
+    note_write_op(state.inner(), &path, &content)
+}
+
+#[tauri::command]
+pub fn search(state: State<Arc<AppState>>, query: String) -> CmdResult<Vec<SearchHit>> {
+    search_op(state.inner(), &query)
+}
+
 #[tauri::command]
 pub fn recents_list(state: State<Arc<AppState>>) -> CmdResult<Vec<(String, String)>> {
-    with_db(&state, |conn| db::list_recents(conn, 20).map_err(|e| e.to_string()))
+    recents_list_op(state.inner())
 }
 
 #[tauri::command]
 pub fn favorites_list(state: State<Arc<AppState>>) -> CmdResult<Vec<(String, String)>> {
-    with_db(&state, |conn| db::list_favorites(conn).map_err(|e| e.to_string()))
+    favorites_list_op(state.inner())
 }
 
-/// 返回切换后的状态（true=已收藏）
 #[tauri::command]
 pub fn favorite_toggle(state: State<Arc<AppState>>, path: String) -> CmdResult<bool> {
-    with_db(&state, |conn| {
-        db::favorite_toggle(conn, &path, fs_ops::now_ms()).map_err(|e| e.to_string())
-    })
+    favorite_toggle_op(state.inner(), &path)
 }
 
 #[tauri::command]
 pub fn asset_save(state: State<Arc<AppState>>, data_base64: String, ext: String) -> CmdResult<String> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&data_base64)
-        .map_err(|e| format!("base64 解码失败: {e}"))?;
-    with_vault(&state, |vault| {
-        fs_ops::save_asset(vault, &bytes, &ext).map_err(|e| e.to_string())
-    })
+    asset_save_op(state.inner(), &data_base64, &ext)
 }
 
+// ---------- 命令层集成测试 ----------
+
+#[cfg(test)]
+mod e2e_tests {
+    //! 验收主链路：建目录 → 写图文笔记 → 搜索到它 → 重命名 → 最近/收藏 → 删除回收站。
+    //! 走 UI 实际调用的 _op 函数（与 IPC 封装仅差一层 3 行转发）。
+    use super::*;
+    use base64::Engine;
+    use tempfile::TempDir;
+
+    fn opened_vault() -> (TempDir, Arc<AppState>) {
+        let dir = TempDir::new().unwrap();
+        let state = Arc::new(AppState::default());
+        open_vault_at(&state, dir.path()).unwrap();
+        (dir, state)
+    }
+
+    #[test]
+    fn acceptance_flow_folder_note_image_search_rename_delete() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+
+        // 1. 建目录
+        let folder = folder_create_op(s, "", "工作").unwrap();
+        assert_eq!(folder.path, "工作");
+        assert!(dir.path().join("工作").is_dir());
+
+        // 2. 写图文笔记（附件落盘 + 正文引用）
+        let note = note_create_op(s, "工作", "会议 纪要").unwrap();
+        assert_eq!(note.path, "工作/会议-纪要.md"); // 空格规范化为 -
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"fake-png-bytes");
+        let asset = asset_save_op(s, &b64, "png").unwrap();
+        assert!(asset.starts_with("assets/"));
+        assert!(asset.ends_with(".png"));
+        assert!(dir.path().join(&asset).exists());
+        let content = format!("# 会议纪要\n\n讨论内容 很重要\n\n![]({})\n", asset);
+        let wr = note_write_op(s, &note.path, &content).unwrap();
+        assert!(!wr.hash.is_empty());
+        let on_disk = std::fs::read_to_string(dir.path().join(&note.path)).unwrap();
+        assert_eq!(on_disk, content); // 文件内容与写入一致
+
+        // 3. 搜索到它（中文正文）
+        let hits = search_op(s, "很重要").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, note.path);
+        assert!(hits[0].snippet.contains("很重要"));
+
+        // 4. 文件夹重命名 → 子笔记索引跟着走，搜索仍命中新路径
+        let new_folder = entry_rename_op(s, "工作", "研发").unwrap();
+        assert_eq!(new_folder, "研发");
+        assert!(dir.path().join("研发/会议-纪要.md").exists());
+        let hits2 = search_op(s, "很重要").unwrap();
+        assert_eq!(hits2.len(), 1);
+        assert_eq!(hits2[0].path, "研发/会议-纪要.md");
+
+        // 5. 最近 / 收藏
+        let read = note_read_op(s, "研发/会议-纪要.md").unwrap();
+        assert!(read.content.contains("很重要"));
+        let recents = recents_list_op(s).unwrap();
+        assert_eq!(recents.len(), 1);
+        assert_eq!(recents[0].0, "研发/会议-纪要.md");
+        assert!(favorite_toggle_op(s, "研发/会议-纪要.md").unwrap());
+        assert_eq!(favorites_list_op(s).unwrap().len(), 1);
+
+        // 6. 删除 → 回收站，索引与收藏清空
+        let trash = entry_delete_op(s, "研发/会议-纪要.md").unwrap();
+        assert!(trash.starts_with(".lanmark/trash/"));
+        assert!(dir.path().join(&trash).exists());
+        assert!(!dir.path().join("研发/会议-纪要.md").exists());
+        assert!(search_op(s, "很重要").unwrap().is_empty());
+        assert!(recents_list_op(s).unwrap().is_empty());
+        assert!(favorites_list_op(s).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_note_sanitizes_and_uniquifies() {
+        let (_dir, state) = opened_vault();
+        let s = &state;
+        let a = note_create_op(s, "", "a/b?:*").unwrap();
+        assert_eq!(a.path, "a-b.md"); // 非法字符剔除 + 连续 - 合并 + 首尾修剪
+        let b = note_create_op(s, "", "a/b?:*").unwrap();
+        assert_eq!(b.path, "a-b-2.md"); // 同名自动 -2
+        let c = note_create_op(s, "", "CON").unwrap();
+        assert_eq!(c.path, "n-CON.md"); // Windows 保留名防护
+    }
+
+    #[test]
+    fn rename_note_preserves_extension_and_updates_index() {
+        let (_dir, state) = opened_vault();
+        let s = &state;
+        let note = note_create_op(s, "", "旧名字").unwrap();
+        note_write_op(s, &note.path, "正文 内容").unwrap();
+        let new_path = entry_rename_op(s, &note.path, "新名字").unwrap();
+        assert_eq!(new_path, "新名字.md"); // 不带 .md 提交也保留扩展名
+        let hits = search_op(s, "正文").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, new_path);
+        assert_eq!(hits[0].title, "新名字"); // 标题随文件名更新
+    }
+
+    #[test]
+    fn folder_move_updates_children_and_trash() {
+        let (dir, state) = opened_vault();
+        let s = &state;
+        let f1 = folder_create_op(s, "", "a").unwrap();
+        let f2 = folder_create_op(s, "", "b").unwrap();
+        let note = note_create_op(s, &f1.path, "n.md").unwrap();
+        note_write_op(s, &note.path, "移动测试").unwrap();
+
+        let moved = entry_move_op(s, &f1.path, &f2.path).unwrap();
+        assert_eq!(moved, "b/a");
+        assert!(dir.path().join("b/a/n.md").exists());
+        let hits = search_op(s, "移动测试").unwrap();
+        assert_eq!(hits[0].path, "b/a/n.md");
+    }
+
+    #[test]
+    fn commands_fail_gracefully_without_vault() {
+        let state = Arc::new(AppState::default());
+        let s = &state;
+        assert!(tree_list_op(s).is_err());
+        assert!(note_create_op(s, "", "x").is_err());
+        assert!(search_op(s, "x").is_err());
+        assert!(note_read_op(s, "x").is_err());
+    }
+
+    #[test]
+    fn create_mode_rejects_dir_with_notes() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("existing.md"), "x").unwrap();
+        let state = Arc::new(AppState::default());
+        let err = pick_and_set_op(&state, dir.path(), "create").unwrap_err();
+        assert!(err.contains("已包含"));
+        // open 模式则放行
+        assert!(open_vault_at(&state, dir.path()).is_ok());
+    }
+}

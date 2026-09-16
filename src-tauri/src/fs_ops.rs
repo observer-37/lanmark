@@ -213,7 +213,12 @@ pub fn rename_entry(
         sanitize_filename_with_ext(new_raw_name)
     } else {
         let old_ext = old_abs.extension().and_then(|e| e.to_str()).unwrap_or("");
-        format!("{}.{}", sanitize_filename(new_raw_name), old_ext)
+        if old_ext.is_empty() {
+            // 文件夹等无扩展名条目：不追加点
+            sanitize_filename(new_raw_name)
+        } else {
+            format!("{}.{}", sanitize_filename(new_raw_name), old_ext)
+        }
     };
     if new_name == old_name {
         return Ok(rel_path.to_string());
