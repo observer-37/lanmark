@@ -27,7 +27,7 @@ interface VaultStore {
   refreshMeta: () => Promise<void>;
   reindex: () => Promise<void>;
   openNote: (path: string, silent?: boolean) => Promise<void>;
-  closeNote: () => void;
+  closeNote: () => Promise<void>;
   setContent: (content: string) => void;
   scheduleSave: () => void;
   saveNow: () => Promise<void>;
@@ -151,7 +151,11 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     }
   },
 
-  closeNote: () => {
+  closeNote: async () => {
+    // 关闭前落盘（数据不丢铁律）
+    if (get().dirty && get().activePath) {
+      await get().saveNow();
+    }
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;

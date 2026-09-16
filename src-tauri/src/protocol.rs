@@ -15,6 +15,7 @@ use crate::vault::AppState;
 /// 解析 vault 协议请求路径 → 文件内容（或 404）。同步纯逻辑，可单测。
 pub fn resolve(state: &Arc<AppState>, raw_path: &str) -> Option<(String, Vec<u8>)> {
     let rel = percent_decode(raw_path.trim_start_matches('/'));
+    log::debug!("vault 协议: 收到请求 raw={raw_path} rel={rel}");
     if rel.is_empty() {
         return None;
     }

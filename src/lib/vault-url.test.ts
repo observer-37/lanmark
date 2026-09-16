@@ -65,6 +65,10 @@ describe("toVaultUrl / fromVaultUrl", () => {
     expect(fromVaultUrl(toVaultUrl("a/b.png"))).toBe("a/b.png");
     expect(fromVaultUrl("plain.png")).toBe("plain.png"); // 非协议 URL 原样
   });
+  it("encode/decode 对称（中文路径——曾因漏 decode 把编码引用写回磁盘）", () => {
+    expect(fromVaultUrl(toVaultUrl("assets/示例图片.png"))).toBe("assets/示例图片.png");
+    expect(fromVaultUrl(toVaultUrl("工作/读书笔记/截图 v2.png"))).toBe("工作/读书笔记/截图 v2.png");
+  });
 });
 
 describe("vaultUrlsToRelative（保存时 URL → 笔记相对引用）", () => {

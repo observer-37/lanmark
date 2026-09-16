@@ -1,4 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
+import { documentDir } from "@tauri-apps/api/path";
+
+/**
+ * 选 vault 目录：桌面走系统文件夹选择器；
+ * 移动端 dialog 插件不支持文件夹选择（FolderPickerNotImplemented）→
+ * M1 回退到 app 文档目录（M2 换 SAF 文件夹选择器）。
+ */
+async function pickFolder(): Promise<string | null> {
+  try {
+    const res = await dialogOpen({ directory: true, multiple: false });
+    return (res as string | null) ?? null;
+  } catch (e) {
+    if (String(e).includes("FolderPickerNotImplemented")) return documentDir();
+    throw e;
+  }
+}
 
 export interface VaultNode {
   path: string;
@@ -31,8 +48,11 @@ export interface PathTitle {
 
 export const vault = {
   status: () => invoke<VaultStatus>("vault_status"),
-  pickAndSet: (mode: "open" | "create") =>
-    invoke<string>("vault_pick_and_set", { mode }),
+  pickAndSet: async (mode: "open" | "create") => {
+    const path = await pickFolder();
+    if (!path) throw new Error("已取消选择");
+    return invoke<string>("vault_set_path", { path, mode });
+  },
   openPath: (path: string) => invoke<string>("vault_open_path", { path }),
   reindex: () => invoke<number>("reindex_vault"),
   tree: () => invoke<VaultNode[]>("tree_list"),

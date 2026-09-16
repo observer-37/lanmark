@@ -60,9 +60,24 @@ export function toVaultUrl(vaultRel: string): string {
   );
 }
 
-/** 协议 URL → vault 相对路径（保存前还原用） */
+/**
+ * 协议 URL → vault 相对路径（保存前还原用）。
+ * 注意必须逐段 percent-decode，与 toVaultUrl 的 encode 对称——
+ * 漏掉解码会把编码后的引用写回磁盘（曾导致中文文件名逐次启动叠加编码）。
+ */
 export function fromVaultUrl(src: string): string {
-  return src.startsWith(VAULT_PREFIX) ? src.slice(VAULT_PREFIX.length) : src;
+  if (!src.startsWith(VAULT_PREFIX)) return src;
+  return src
+    .slice(VAULT_PREFIX.length)
+    .split("/")
+    .map((seg) => {
+      try {
+        return decodeURIComponent(seg);
+      } catch {
+        return seg;
+      }
+    })
+    .join("/");
 }
 
 /**

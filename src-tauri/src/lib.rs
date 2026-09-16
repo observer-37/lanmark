@@ -73,7 +73,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ping,
             commands::vault_status,
-            commands::vault_pick_and_set,
+            commands::vault_set_path,
             commands::vault_open_path,
             commands::reindex_vault,
             commands::tree_list,

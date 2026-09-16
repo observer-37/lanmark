@@ -46,29 +46,24 @@ pub fn vault_status(app: tauri::AppHandle, state: State<Arc<AppState>>) -> CmdRe
     })
 }
 
-/// 打开（或创建）vault：文件夹选择对话框 → 校验/初始化 → 写配置 → 开库 → 重索引。
+/// 按路径打开/创建 vault 并持久化配置。
+/// 文件夹选择由前端完成（JS dialog 桌面跨平台；移动端 M1 用 app 文档目录，M2 改 SAF 选择器），
+/// 本命令只接收路径——Rust 侧不依赖任何 cfg(desktop) 的对话框 API。
 #[tauri::command]
-pub fn vault_pick_and_set(
+pub fn vault_set_path(
     app: tauri::AppHandle,
     state: State<Arc<AppState>>,
+    path: String,
     mode: String,
 ) -> CmdResult<String> {
-    use tauri_plugin_dialog::DialogExt;
-
-    let picked = app
-        .dialog()
-        .file()
-        .blocking_pick_folder()
-        .ok_or("已取消选择")?;
-    let path: PathBuf = picked.into_path().map_err(|e| format!("路径无效: {e}"))?;
-    if !path.is_dir() {
-        return Err("所选路径不是目录".into());
+    let p = PathBuf::from(&path);
+    if !p.is_dir() {
+        return Err(format!("目录不存在: {path}"));
     }
-
-    pick_and_set_op(&state, &path, &mode)?;
-    let cfg = AppConfig { vault_path: Some(path.to_string_lossy().to_string()) };
+    pick_and_set_op(&state, &p, &mode)?;
+    let cfg = AppConfig { vault_path: Some(path.clone()) };
     vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
-    Ok(path.to_string_lossy().to_string())
+    Ok(path)
 }
 
 /// 纯逻辑：校验目录 → 开库（对话框与配置持久化由上层负责）

@@ -38,6 +38,7 @@ function MilkdownHost({
     // frontmatter 不进编辑器（CommonMark 会破坏 --- ），保存时原样回填
     const { fm, body } = splitFrontmatter(content);
     const baseDir = parentDir(notePath);
+    let suppressChange = true; // 启动期改写不触发保存
     (async () => {
       crepe = new Crepe({
         root: host,
@@ -61,9 +62,12 @@ function MilkdownHost({
         },
       });
       crepe.on((listener) => {
-        listener.markdownUpdated((_ctx, md) =>
-          onChange(joinFrontmatter(fm, vaultUrlsToRelative(md, baseDir))),
-        );
+        listener.markdownUpdated((_ctx, md) => {
+          // 启动期的图片 URL 改写 dispatch 也会触发 markdownUpdated——
+          // 抑制它，否则「打开笔记」就变成「保存笔记」（文件被重写、mtime/哈希变化）
+          if (suppressChange) return;
+          onChange(joinFrontmatter(fm, vaultUrlsToRelative(md, baseDir)));
+        });
       });
       await crepe.create();
       if (cancelled) {
@@ -89,6 +93,7 @@ function MilkdownHost({
         }
       });
       if (changed) view.dispatch(tr);
+      suppressChange = false; // dispatch 已同步完成（markdownUpdated 同步触发），放开
 
       // 图片落盘并插入（粘贴 / 拖入共用）：插入 vault 协议 URL（显示用），
       // 保存时 stripVaultPrefix 会还原为相对引用
