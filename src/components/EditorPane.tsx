@@ -8,6 +8,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { useVaultStore } from "../stores/vault";
 import { uploadFile } from "../lib/image";
 import { splitFrontmatter, joinFrontmatter } from "../lib/frontmatter";
+import { protectWikilinks, restoreWikilinks } from "../lib/wikilink";
 import {
   isExternal,
   resolveFrom,
@@ -37,12 +38,14 @@ function MilkdownHost({
     host.innerHTML = "";
     // frontmatter 不进编辑器（CommonMark 会破坏 --- ），保存时原样回填
     const { fm, body } = splitFrontmatter(content);
+    // wikilink 不进编辑器（CommonMark 会破坏 [[...]] 语义），保存时还原
+    const { body: editorBody, map: wikiMap } = protectWikilinks(body);
     const baseDir = parentDir(notePath);
     let suppressChange = true; // 启动期改写不触发保存
     (async () => {
       crepe = new Crepe({
         root: host,
-        defaultValue: body,
+        defaultValue: editorBody,
         features: {
           // 精简：关掉 AI 光标 / 顶栏，保留工具栏（斜杠菜单）、代码块、表格、公式
           [CrepeFeature.AI]: false,
@@ -66,7 +69,7 @@ function MilkdownHost({
           // 启动期的图片 URL 改写 dispatch 也会触发 markdownUpdated——
           // 抑制它，否则「打开笔记」就变成「保存笔记」（文件被重写、mtime/哈希变化）
           if (suppressChange) return;
-          onChange(joinFrontmatter(fm, vaultUrlsToRelative(md, baseDir)));
+          onChange(joinFrontmatter(fm, vaultUrlsToRelative(restoreWikilinks(md, wikiMap), baseDir)));
         });
       });
       await crepe.create();

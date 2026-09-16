@@ -31,7 +31,7 @@ scripts/lanmark-desktop.sh
 ```bash
 scripts/make-demo-vault.sh    # → ~/lanmark-demo-vault（中文笔记/图片/frontmatter + 验收清单）
 ```
-然后在首启页「打开现有笔记库」指向它，按「欢迎使用 Lanmark.md」里的 6 步清单走一遍。
+然后在首启页「打开现有笔记库」指向它，按「欢迎使用 Lanmark.md」里的 验收清单走一遍。
 
 ## 开发
 

@@ -12,6 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { Crepe, CrepeFeature } from "@milkdown/crepe";
 import { splitFrontmatter, joinFrontmatter } from "../lib/frontmatter";
+import { protectWikilinks, restoreWikilinks } from "../lib/wikilink";
 
 /** 与 EditorPane 一致的产品 feature 配置 */
 const PRODUCT_FEATURES = {
@@ -165,6 +166,14 @@ describe("Milkdown 往返保真（M1 决策门）", () => {
     expect(semantic(out)).toBe(semantic(md));
     // 性能护栏：1500 行往返应在合理时间内完成
     expect(ms).toBeLessThan(15000);
+  });
+
+  it("Obsidian wikilink / 嵌入经产品流程（保护→编辑→还原）字节级不变", async () => {
+    const md = ["参见 [[另一篇笔记]] 与 ![[嵌入块]]，以及 [[a|别名]]。", "", "普通 **加粗** 文本。"].join("\n") + "\n"; // 真实文件以 \n 结尾
+    const { body, map } = protectWikilinks(md);
+    const out = restoreWikilinks(await roundtrip(body), map);
+    expect(out).toBe(md); // 字节级还原（含 ![[嵌入]]、[[a|别名]]）
+    expect(out).not.toContain("⟦"); // 占位符不得泄漏到输出
   });
 
   it("insertImageCommand 插入可序列化（粘贴链最后一段：命令 → 文档 → md）", async () => {
