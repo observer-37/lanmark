@@ -6,6 +6,51 @@ interface Props {
   tree: VaultNode[];
 }
 
+/**
+ * 内联重命名输入框。
+ * 必须是有自己 state 的独立组件：value 绑定本组件 draft（实时显示输入）。
+ * 曾踩坑：value 绑 node.name 而 onChange 写父级 draft → 每次击键被重置回原名，
+ * 输入「不显示」直到 Enter 提交后才变化。
+ */
+function RenameInput({
+  path,
+  initial,
+  onCommit,
+  onCancel,
+}: {
+  path: string;
+  initial: string;
+  onCommit: (path: string, name: string) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(initial);
+  const commit = () => {
+    const d = draft.trim();
+    if (d) onCommit(path, d);
+    else onCancel();
+  };
+  return (
+    <input
+      autoFocus
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      className="w-full min-w-0 rounded border border-emerald-600 bg-zinc-900 px-1 py-0.5 text-sm outline-none"
+      onFocus={(e) => e.target.select()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        } else if (e.key === "Escape") {
+          onCancel();
+        }
+      }}
+    />
+  );
+}
+
 /** 目录树：扁平渲染（深度 = 路径段数），hover 显示操作，支持内联重命名 */
 export function TreeView({ tree }: Props) {
   const activePath = useVaultStore((s) => s.activePath);
@@ -18,7 +63,6 @@ export function TreeView({ tree }: Props) {
   const deleteNode = useVaultStore((s) => s.deleteNode);
   const toggleFavorite = useVaultStore((s) => s.toggleFavorite);
   const setRenaming = useVaultStore((s) => s.setRenaming);
-  const [draft, setDraft] = useState("");
 
   const favSet = new Set(favorites.map((f) => f.path));
 
@@ -51,27 +95,12 @@ export function TreeView({ tree }: Props) {
               </span>
 
               {isRenaming ? (
-                <input
-                  autoFocus
-                  value={isNote ? node.name.replace(/\.md$/, "") : node.name}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  className="w-full min-w-0 rounded border border-emerald-600 bg-zinc-900 px-1 py-0.5 text-sm outline-none"
-                  onFocus={(e) => e.target.select()}
-                  onBlur={() => {
-                    const d = draft.trim();
-                    setRenaming(null);
-                    if (d) void commitRename(node.path, d);
-                  }}
-                  onKeyDown={(e) => {
-                    e.stopPropagation();
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void commitRename(node.path, draft.trim());
-                    } else if (e.key === "Escape") {
-                      setRenaming(null);
-                    }
-                  }}
+                <RenameInput
+                  key={`rename-${node.path}`}
+                  path={node.path}
+                  initial={isNote ? node.name.replace(/\.md$/, "") : node.name}
+                  onCommit={(p, name) => void commitRename(p, name)}
+                  onCancel={() => setRenaming(null)}
                 />
               ) : (
                 <span className="min-w-0 flex-1 truncate text-sm">
@@ -98,7 +127,6 @@ export function TreeView({ tree }: Props) {
                         className="rounded px-1 text-xs hover:bg-zinc-700"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setDraft(isNote ? node.name.replace(/\.md$/, "") : node.name);
                           setRenaming(node.path);
                         }}
                       >
