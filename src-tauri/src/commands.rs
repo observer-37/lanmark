@@ -437,4 +437,34 @@ mod e2e_tests {
         // open 模式则放行
         assert!(open_vault_at(&state, dir.path()).is_ok());
     }
+
+    #[test]
+    fn perf_guardrail_500_notes_reindex_and_search() {
+        //! 设计文档声称 LIKE 搜索可撑到 ~1e4 笔记；此处用 500 笔记验证量级安全。
+        use std::time::Instant;
+
+        let dir = TempDir::new().unwrap();
+        for i in 0..500 {
+            let sub = format!("dir{}", i % 5);
+            std::fs::create_dir_all(dir.path().join(&sub)).unwrap();
+            let content = format!("# 笔记 {i}\n\n编号 {i} 的正文，关键词 kw{i:03}。{}\n", "填充内容。".repeat(10));
+            std::fs::write(dir.path().join(format!("{sub}/笔记-{i:03}.md")), content).unwrap();
+        }
+
+        let state = Arc::new(AppState::default());
+        let t0 = Instant::now();
+        open_vault_at(&state, dir.path()).unwrap(); // 含全量 reindex
+        let index_ms = t0.elapsed().as_millis();
+
+        let t1 = Instant::now();
+        let exact = search_op(&state, "kw499").unwrap();
+        let prefix = search_op(&state, "kw12").unwrap(); // 命中 kw120..kw129
+        let search_ms = t1.elapsed().as_millis();
+
+        assert_eq!(exact.len(), 1);
+        assert_eq!(prefix.len(), 10);
+        eprintln!("perf: 500 笔记 reindex={index_ms}ms, 两次搜索={search_ms}ms");
+        assert!(index_ms < 10_000, "reindex 过慢: {index_ms}ms");
+        assert!(search_ms < 1_000, "搜索过慢: {search_ms}ms");
+    }
 }

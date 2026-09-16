@@ -166,4 +166,22 @@ describe("Milkdown 往返保真（M1 决策门）", () => {
     // 性能护栏：1500 行往返应在合理时间内完成
     expect(ms).toBeLessThan(15000);
   });
+
+  it("insertImageCommand 插入可序列化（粘贴链最后一段：命令 → 文档 → md）", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const crepe = new Crepe({
+      root,
+      defaultValue: "# 标题\n\n正文。",
+      features: PRODUCT_FEATURES,
+    });
+    await crepe.create();
+    const { insertImageCommand } = await import("@milkdown/kit/preset/commonmark");
+    insertImageCommand.run({ src: "vault://localhost/assets/x.png", alt: "测试图" });
+    const md = crepe.getMarkdown();
+    expect(md).toContain("![测试图](vault://localhost/assets/x.png)"); // alt 原样保留
+    expect(md).not.toContain("1.00"); // ImageBlock 已关闭：不得出现比例伪 alt
+    await crepe.destroy();
+    root.remove();
+  });
 });
