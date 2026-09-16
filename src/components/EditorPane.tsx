@@ -6,6 +6,7 @@ import { markdown } from "@codemirror/lang-markdown";
 
 import { useVaultStore } from "../stores/vault";
 import { uploadFile } from "../lib/image";
+import { splitFrontmatter, joinFrontmatter } from "../lib/frontmatter";
 
 /** WYSIWYG 编辑器宿主（Crepe）：切换笔记/模式时整体重建，避免状态残留 */
 function MilkdownHost({
@@ -24,35 +25,32 @@ function MilkdownHost({
     let crepe: Crepe | null = null;
 
     host.innerHTML = "";
+    // frontmatter 不进编辑器（CommonMark 会破坏 --- ），保存时原样回填
+    const { fm, body } = splitFrontmatter(content);
     (async () => {
       crepe = new Crepe({
         root: host,
-        defaultValue: content,
+        defaultValue: body,
         features: {
-          // 精简：关掉 AI 光标 / 顶栏，保留工具栏（斜杠菜单）、代码块、表格、公式、图片
+          // 精简：关掉 AI 光标 / 顶栏，保留工具栏（斜杠菜单）、代码块、表格、公式
           [CrepeFeature.AI]: false,
           [CrepeFeature.Cursor]: false,
           [CrepeFeature.TopBar]: false,
+          // ImageBlock 关闭：其序列化会把缩放比例写进 alt（![1.00](…)），
+          // 破坏原始 markdown。图片走 commonmark 原生节点：粘贴（insertImageCommand）或手写 ![](...)
+          [CrepeFeature.ImageBlock]: false,
           [CrepeFeature.Latex]: true,
           [CrepeFeature.Table]: true,
           [CrepeFeature.CodeMirror]: true,
-          [CrepeFeature.ImageBlock]: true,
           [CrepeFeature.Toolbar]: true,
           [CrepeFeature.BlockEdit]: true,
           [CrepeFeature.ListItem]: true,
           [CrepeFeature.LinkTooltip]: true,
           [CrepeFeature.Placeholder]: true,
         },
-        featureConfigs: {
-          [CrepeFeature.ImageBlock]: {
-            onUpload: (file: File) => uploadFile(file),
-            inlineOnUpload: (file: File) => uploadFile(file),
-            blockOnUpload: (file: File) => uploadFile(file),
-          },
-        },
       });
       crepe.on((listener) => {
-        listener.markdownUpdated((_ctx, md) => onChange(md));
+        listener.markdownUpdated((_ctx, md) => onChange(joinFrontmatter(fm, md)));
       });
       await crepe.create();
       if (cancelled) {
@@ -60,14 +58,9 @@ function MilkdownHost({
         return;
       }
 
-      // 剪贴板图片粘贴 → 落盘 assets/ → 在光标处插入（Crepe 的 ImageBlock 不处理粘贴）
-      const onPaste = async (e: ClipboardEvent) => {
-        const files = Array.from(e.clipboardData?.items ?? [])
-          .filter((i) => i.kind === "file")
-          .map((i) => i.getAsFile())
-          .filter((f): f is File => !!f);
-        if (files.length === 0 || !crepe) return;
-        e.preventDefault();
+      // 图片落盘并插入（粘贴 / 拖入共用）
+      const insertFiles = async (files: File[]) => {
+        if (!crepe) return;
         for (const f of files) {
           try {
             const rel = await uploadFile(f);
@@ -78,16 +71,45 @@ function MilkdownHost({
           }
         }
       };
+
+      // 剪贴板图片粘贴 → 落盘 assets/ → 在光标处插入
+      const onPaste = (e: ClipboardEvent) => {
+        const files = Array.from(e.clipboardData?.items ?? [])
+          .filter((i) => i.kind === "file")
+          .map((i) => i.getAsFile())
+          .filter((f): f is File => !!f);
+        if (files.length === 0) return;
+        e.preventDefault();
+        void insertFiles(files);
+      };
+
+      // 文件拖入（仅拦截图片文件，文本拖拽仍走 ProseMirror 默认行为）
+      const onDragOver = (e: DragEvent) => {
+        if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+      };
+      const onDrop = (e: DragEvent) => {
+        const files = Array.from(e.dataTransfer?.files ?? []).filter(
+          (f) => f.type.startsWith("image/") || f.name.match(/\.(png|jpe?g|gif|webp|svg|bmp)$/i),
+        );
+        if (files.length === 0) return;
+        e.preventDefault();
+        void insertFiles(files);
+      };
+
       host.addEventListener("paste", onPaste);
-      // 把 onPaste 的清理闭包挂到 host 上，便于 unmount 时移除
-      (host as HTMLDivElement & { __lanmarkPaste?: (e: ClipboardEvent) => unknown }).__lanmarkPaste =
-        onPaste;
+      host.addEventListener("dragover", onDragOver);
+      host.addEventListener("drop", onDrop);
+      (host as HTMLDivElement & { __lanmarkCleanup?: () => void }).__lanmarkCleanup = () => {
+        host.removeEventListener("paste", onPaste);
+        host.removeEventListener("dragover", onDragOver);
+        host.removeEventListener("drop", onDrop);
+      };
     })();
 
     return () => {
       cancelled = true;
-      const h = host as HTMLDivElement & { __lanmarkPaste?: (e: ClipboardEvent) => unknown };
-      if (h.__lanmarkPaste) host.removeEventListener("paste", h.__lanmarkPaste);
+      const h = host as HTMLDivElement & { __lanmarkCleanup?: () => void };
+      h.__lanmarkCleanup?.();
       void crepe?.destroy();
       host.innerHTML = "";
     };
