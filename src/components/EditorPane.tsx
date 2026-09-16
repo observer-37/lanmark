@@ -17,6 +17,13 @@ import {
 } from "../lib/vault-url";
 import { parentDir } from "../lib/vault";
 
+/** 从 Crepe 取 ProseMirror EditorView（类型走推断，避免直接依赖 prosemirror 包） */
+async function getEditorView(crepe: Crepe) {
+  return crepe.editor.action((ctx) => ctx.get(editorViewCtx));
+}
+type LMView = Awaited<ReturnType<typeof getEditorView>>;
+type LMDoc = LMView["state"]["doc"];
+
 /** WYSIWYG 编辑器宿主（Crepe）：切换笔记/模式时整体重建，避免状态残留 */
 function MilkdownHost({
   content,
@@ -34,17 +41,25 @@ function MilkdownHost({
     if (!host) return;
     let cancelled = false;
     let crepe: Crepe | null = null;
+    // 每次挂载用专属 inner root：即便 effect 重跑（双挂载/热更新），
+    // 旧实例的残留 DOM 随 root 一起移除，不与新实例互相踩踏
+    const inner = document.createElement("div");
+    inner.className = "editor-inner";
+    host.appendChild(inner);
 
-    host.innerHTML = "";
     // frontmatter 不进编辑器（CommonMark 会破坏 --- ），保存时原样回填
     const { fm, body } = splitFrontmatter(content);
     // wikilink 不进编辑器（CommonMark 会破坏 [[...]] 语义），保存时还原
     const { body: editorBody, map: wikiMap } = protectWikilinks(body);
     const baseDir = parentDir(notePath);
-    let suppressChange = true; // 启动期改写不触发保存
+    let view: LMView | null = null;
+    // 基线文档：只有 doc 树真正相对基线变化过，才放行 markdownUpdated。
+    // （Crepe create 后会异步触发一次「同 doc 重序列化」事件——列表 - 会变 *、
+    //  补尾行——若放行就会「打开笔记=重写文件」；见 docs/04 §9c）
+    let lastKnownDoc: LMDoc | null = null;
     (async () => {
       crepe = new Crepe({
-        root: host,
+        root: inner,
         defaultValue: editorBody,
         features: {
           // 精简：关掉 AI 光标 / 顶栏，保留工具栏（斜杠菜单）、代码块、表格、公式
@@ -66,9 +81,9 @@ function MilkdownHost({
       });
       crepe.on((listener) => {
         listener.markdownUpdated((_ctx, md) => {
-          // 启动期的图片 URL 改写 dispatch 也会触发 markdownUpdated——
-          // 抑制它，否则「打开笔记」就变成「保存笔记」（文件被重写、mtime/哈希变化）
-          if (suppressChange) return;
+          if (!view || !lastKnownDoc) return; // 基线未建立（create/改写期间）：一律抑制
+          if (view.state.doc.eq(lastKnownDoc)) return; // 同 doc 重序列化（伪事件）：抑制
+          lastKnownDoc = view.state.doc; // 真实编辑：放行并刷新基线
           onChange(joinFrontmatter(fm, vaultUrlsToRelative(restoreWikilinks(md, wikiMap), baseDir)));
         });
       });
@@ -79,7 +94,7 @@ function MilkdownHost({
       }
 
       // 图片显示：文档树里相对 src → vault 协议 URL（仅改显示，不改源文件）
-      const view = crepe.editor.action((ctx) => ctx.get(editorViewCtx));
+      view = await getEditorView(crepe);
       const tr = view.state.tr;
       let changed = false;
       view.state.doc.descendants((node, pos) => {
@@ -96,7 +111,7 @@ function MilkdownHost({
         }
       });
       if (changed) view.dispatch(tr);
-      suppressChange = false; // dispatch 已同步完成（markdownUpdated 同步触发），放开
+      lastKnownDoc = view.state.doc; // 基线建立：此后只放行真实 doc 变化
 
       // 图片落盘并插入（粘贴 / 拖入共用）：插入 vault 协议 URL（显示用），
       // 保存时 stripVaultPrefix 会还原为相对引用
@@ -151,8 +166,12 @@ function MilkdownHost({
       cancelled = true;
       const h = host as HTMLDivElement & { __lanmarkCleanup?: () => void };
       h.__lanmarkCleanup?.();
-      void crepe?.destroy();
-      host.innerHTML = "";
+      try {
+        void crepe?.destroy().catch(() => {});
+      } catch {
+        // 创建中的实例 destroy 可能同步抛错（StrictMode 已移除，防御性保留）
+      }
+      inner.remove(); // 专属 root 整体移除，旧实例 DOM 不残留
     };
     // 仅在笔记切换 / 模式切换时重建（key 由父组件控制）
     // eslint-disable-next-line react-hooks/exhaustive-deps
