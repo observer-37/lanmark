@@ -1,0 +1,33 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# 本地工具链缓存（pnpm/cargo 缓存重定向到这里）
+.cache/
+
+# Tauri 生成的 schema（每次构建自动再生）
+src-tauri/gen/schemas
+
+# Rust 构建产物（数 GB）
+src-tauri/target
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
