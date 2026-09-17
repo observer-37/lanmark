@@ -18,6 +18,9 @@ dist-ssr
 # Tauri 生成的 schema（每次构建自动再生）
 src-tauri/gen/schemas
 
+# 视觉改版的设计稿与 QA 截图（本地留存，不入库）
+design/
+
 # Rust 构建产物（数 GB）
 src-tauri/target
 
