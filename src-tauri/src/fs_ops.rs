@@ -72,21 +72,24 @@ fn is_note_file(p: &Path) -> bool {
     p.extension().map(|e| e == "md").unwrap_or(false)
 }
 
-/// 遍历 vault（跳过 .lanmark），目录在前、名称排序，返回相对路径节点列表
+/// 遍历 vault（跳过 .lanmark），返回相对路径节点列表。
+/// 顺序 = 深度优先前序：每个目录内「目录在前、按名升序（忽略大小写）」，
+/// 文件夹后紧跟其子项——扁平列表 + 前端按段数缩进即可还原层级。
 pub fn list_tree(vault: &Path) -> std::io::Result<Vec<Node>> {
     let mut out = Vec::new();
     walk(vault, vault, &mut out)?;
-    out.sort_by(|a, b| {
-        let ka = if a.kind == "folder" { 0 } else { 1 };
-        let kb = if b.kind == "folder" { 0 } else { 1 };
-        (ka, a.name.to_lowercase()).cmp(&(kb, b.name.to_lowercase()))
-    });
     Ok(out)
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<Node>) -> std::io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    // 逐目录排序（目录在前、按名升序）；⚠️ 不能对整棵树做全局 (kind, name) 排序——
+    // 那会把不同层级的同名序节点穿插在一起，破坏「子项紧跟父目录」的深度优先序
+    let mut entries: Vec<std::fs::DirEntry> = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|e| {
+        let is_dir = e.path().is_dir();
+        (!is_dir, e.file_name().to_string_lossy().to_lowercase())
+    });
+    for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if name == META_DIR || name.starts_with('.') {
@@ -553,5 +556,48 @@ mod tests {
         assert!(p1.starts_with("assets/"));
         assert!(p1.ends_with(".png"));
         assert!(tmp.path().join(&p1).exists());
+    }
+
+    /// 回归：树必须保持「深度优先前序 + 目录内目录在前/按名升序」。
+    /// 曾因对整棵树全局 (kind, name) 排序，把不同层级节点按名穿插，
+    /// 三层真实 vault 下层级完全打散（用户报障：目录树与实际结构不一致）。
+    #[test]
+    fn list_tree_keeps_hierarchical_dfs_order() {
+        let (tmp, _conn) = setup();
+        let vault = tmp.path();
+        // 构造与技术支撑库同构的三层结构：
+        // 技术/人工智能/CUDA.md、技术/编程语言/{Git,SQL}.md、技术/系统与网络/Arch.md、
+        // 备忘/租房.md、根 README.md、assets/
+        for dir in ["技术/人工智能", "技术/编程语言", "技术/系统与网络", "备忘", "assets"] {
+            fs::create_dir_all(vault.join(dir)).unwrap();
+        }
+        for rel in [
+            "技术/人工智能/CUDA C 权威编程指南.md",
+            "技术/编程语言/SQL必知必会.md",
+            "技术/编程语言/Git版本管理.md",
+            "技术/系统与网络/Arch Linux使用笔记.md",
+            "备忘/密码簿.md",
+            "备忘/租房.md",
+            "README.md",
+        ] {
+            fs::write(vault.join(rel), "# t").unwrap();
+        }
+
+        let tree = list_tree(vault).unwrap();
+        let paths: Vec<&str> = tree.iter().map(|n| n.path.as_str()).collect();
+        let idx = |p: &str| paths.iter().position(|&x| x == p).unwrap_or(usize::MAX);
+
+        // 1) 子项紧跟父目录（DFS 前序）：父 < 子，且人工智能的子块先于兄弟目录编程语言
+        assert!(idx("技术") < idx("技术/人工智能"));
+        assert!(idx("技术/人工智能") < idx("技术/人工智能/CUDA C 权威编程指南.md"));
+        assert!(idx("技术/人工智能/CUDA C 权威编程指南.md") < idx("技术/编程语言"));
+
+        // 2) 同目录内目录在前、按名升序：assets < 备忘 < 技术，根级笔记 README 在根级目录后
+        assert!(idx("assets") < idx("备忘"));
+        assert!(idx("备忘") < idx("技术"));
+        assert!(idx("技术/系统与网络/Arch Linux使用笔记.md") < idx("README.md"));
+
+        // 3) 兄弟子块连续：备忘 的两个文件相邻，且按名升序（密 < 租）
+        assert_eq!(idx("备忘/密码簿.md") + 1, idx("备忘/租房.md"));
     }
 }
