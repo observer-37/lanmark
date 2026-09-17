@@ -2,41 +2,262 @@
 @import "@milkdown/crepe/theme/common/style.css";
 @import "@milkdown/crepe/theme/frame-dark.css";
 
+/* ══════════════════════════════════════════════════════════
+   Lanmark 设计 token（方向 C · 晨窗 —— 冷白清爽生产力）
+   色板来源：design/directions/方向C-晨窗.html（用户选定基线）
+   语义变量集中在 :root，未来加暗色主题只换这一层。
+   ══════════════════════════════════════════════════════════ */
+:root {
+  /* 中性色阶 */
+  --c-canvas: oklch(0.973 0.003 260);   /* 应用底（冷白） */
+  --c-content: oklch(0.985 0.002 260);  /* 内容底 */
+  --c-side: oklch(0.995 0.002 260);     /* 侧栏白 */
+  --c-card: #ffffff;                    /* 纸卡 */
+  --c-ink: oklch(0.24 0.015 260);       /* 主文字 */
+  --c-ink-2: oklch(0.5 0.015 260);      /* 次文字 */
+  --c-ink-3: oklch(0.64 0.012 260);     /* 占位/弱图标 */
+  --c-line: oklch(0.92 0.004 260);      /* 发丝线 */
+
+  /* 唯一强调色：靛蓝 */
+  --c-acc: oklch(0.53 0.19 264);
+  --c-acc-txt: oklch(0.47 0.16 264);
+  --c-acc-08: oklch(0.53 0.19 264 / 0.08);
+  --c-acc-14: oklch(0.53 0.19 264 / 0.14);
+
+  /* 功能色：保存态绿 / 未保存琥珀 / 文件夹彩色编码 */
+  --c-ok: oklch(0.52 0.11 155);
+  --c-warn: oklch(0.58 0.11 75);
+  --c-fd-1: oklch(0.52 0.11 155);  /* 文件夹色 1（绿） */
+  --c-fd-2: oklch(0.58 0.11 75);   /* 文件夹色 2（琥珀） */
+  --c-fd-3: oklch(0.52 0.12 250);  /* 文件夹色 3（蓝），循环 */
+
+  /* 投影体系 */
+  --sh-card: 0 1px 2px rgb(15 18 30 / 0.06), 0 4px 14px rgb(15 18 30 / 0.05);
+  --sh-pop: 0 1px 2px rgb(15 18 30 / 0.1), 0 2px 6px rgb(15 18 30 / 0.08);
+  --sh-slider: 0 1px 2px rgb(15 18 30 / 0.2), 0 2px 8px oklch(0.53 0.19 264 / 0.35);
+}
+
+/* 把语义 token 映射成 Tailwind utility（bg-canvas / text-ink-2 / border-line …） */
+@theme inline {
+  --color-canvas: var(--c-canvas);
+  --color-content: var(--c-content);
+  --color-side: var(--c-side);
+  --color-card: var(--c-card);
+  --color-ink: var(--c-ink);
+  --color-ink-2: var(--c-ink-2);
+  --color-ink-3: var(--c-ink-3);
+  --color-line: var(--c-line);
+  --color-accent: var(--c-acc);
+  --color-accent-text: var(--c-acc-txt);
+  --color-accent-soft: var(--c-acc-08);
+  --color-ok: var(--c-ok);
+  --color-warn: var(--c-warn);
+  --shadow-card: var(--sh-card);
+  --shadow-pop: var(--sh-pop);
+  --shadow-slider: var(--sh-slider);
+  --font-sans: "Noto Sans", "Segoe UI", system-ui, "Noto Sans CJK SC",
+    "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace,
+    "Noto Sans Mono CJK SC", monospace;
+}
+
 html,
 body,
 #root {
   height: 100%;
 }
 
-/* ---- Milkdown 编辑器宿主 ---- */
+body {
+  margin: 0;
+  background: var(--c-canvas);
+  color: var(--c-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-autospace: normal;
+}
+
+::selection {
+  background: oklch(0.53 0.19 264 / 0.18);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(0.87 0.006 260);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.78 0.01 260);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ── Milkdown 编辑器宿主（白色纸卡上写作） ──
+   正文列宽跟随编辑器宽度自适应：不用固定 max-width，
+   留白随视口缩放（clamp），最大化后正文能吃满编辑区。 */
 .editor-host {
   height: 100%;
   overflow-y: auto;
-  padding-bottom: 4rem;
+  padding: 0.5rem clamp(1.5rem, 5vw, 7rem) 4rem;
 }
 
 .editor-host .milkdown {
   height: auto;
   min-height: 100%;
-  max-width: 50rem;
+  max-width: none;
   margin: 0 auto;
 }
 
-/* ---- CodeMirror 源码模式（暗色适配） ---- */
+/* Crepe frame 主题变量 → 晨窗浅色（frame-dark 仅是变量块，覆盖即换肤） */
+.milkdown {
+  --crepe-color-background: var(--c-card);
+  --crepe-color-on-background: var(--c-ink);
+  --crepe-color-surface: oklch(0.955 0.004 260);
+  --crepe-color-surface-low: oklch(0.925 0.005 260);
+  --crepe-color-on-surface: var(--c-ink);
+  --crepe-color-on-surface-variant: var(--c-ink-2);
+  --crepe-color-outline: oklch(0.8 0.008 260);
+  --crepe-color-primary: var(--c-acc);
+  --crepe-color-secondary: oklch(0.985 0.002 260); /* 代码块工具按钮：灰底上的白色药丸 */
+  --crepe-color-on-secondary: var(--c-acc-txt);
+  --crepe-color-inverse: var(--c-ink);
+  --crepe-color-on-inverse: #ffffff;
+  --crepe-color-inline-code: var(--c-acc-txt);
+  --crepe-color-inline-area: oklch(0.955 0.004 260); /* 漏覆盖会残留 frame-dark 的深灰 #2b2b2b */
+  --crepe-color-error: oklch(0.5 0.19 25);
+  --crepe-color-hover: oklch(0.94 0.004 260);
+  --crepe-color-selected: var(--c-acc-14);
+  --crepe-base-font-size: 16px;
+  --crepe-font-title: var(--font-sans);
+  --crepe-font-default: var(--font-sans);
+  --crepe-font-code: var(--font-mono);
+}
+
+/* 内联代码 chip：与晨窗设计稿一致（浅靛蓝底 + 深靛蓝字 + 发丝边框），
+   替换 crepe 默认的「深底红字」；同规则顺带修正 pre 的 inline-area 底色 */
+.milkdown .ProseMirror code {
+  color: var(--c-acc-txt);
+  background: var(--c-acc-08);
+  border: 1px solid oklch(0.53 0.19 264 / 0.12);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+/* ── Crepe 代码块：消灭「文字与代码块之间的空行」 ──
+   crepe 的 .tools 行（语言按钮 + copy 按钮）在流式布局里靠 opacity:0 隐藏，
+   但仍然占据一整行高度；叠加块内边距（上 8 / 下 20），视觉上就是一段长空行。
+   改为悬浮覆盖：默认不占位、hover 时浮现在代码块顶部（VSCode 式）。 */
+.milkdown .milkdown-code-block {
+  padding: 4px 20px 12px;
+  margin: 6px 0;
+}
+
+.milkdown .milkdown-code-block .tools {
+  position: absolute;
+  top: 8px;
+  left: 20px;
+  right: 20px;
+  z-index: 10; /* cm-editor 自带 position:relative，会盖住无层级的兄弟节点 */
+  pointer-events: none; /* 隐藏时不拦截代码首行的点击 */
+}
+
+.milkdown .milkdown-code-block:hover .tools {
+  pointer-events: auto;
+}
+
+.milkdown .milkdown-code-block .tools .language-button {
+  margin-bottom: 0; /* 原为流式预留 8px，悬浮后不需要 */
+  background: var(--c-card);
+  box-shadow: var(--sh-pop);
+}
+
+/* ── 图标按钮 tooltip（data-tip）：悬停浮现的深色小气泡 ── */
+[data-tip] {
+  position: relative;
+}
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--c-ink);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease 0.2s;
+  z-index: 60;
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+}
+
+/* ── 阅读模式：只读 + 组件无 hover 浮层/高亮 ──
+   （交互特性 Toolbar/BlockEdit/LinkTooltip 已在组件层关闭，这里兜底 CSS 层的 hover） */
+.reading .milkdown-code-block .tools {
+  display: none; /* 语言/copy 悬浮工具不出现 */
+}
+.reading .milkdown-code-block .cm-editor {
+  pointer-events: none; /* 内嵌 CodeMirror 不可聚焦编辑（选中复制请用源码模式） */
+}
+.reading .milkdown-table-block .cell-handle,
+.reading .milkdown-table-block .line-handle {
+  display: none !important; /* 表格行列操作手柄不出现 */
+}
+.reading .milkdown .ProseMirror {
+  caret-color: transparent;
+}
+
+/* ── CodeMirror 源码模式（晨窗浅色） ──
+   注意：这里不设全局背景——WYSIWYG 里内嵌的代码块 cm-editor
+   由 Crepe 规则控制（surface 灰底）；源码模式的白底走 .source-editor 作用域。 */
 .cm-editor {
   height: 100%;
   font-size: 13.5px;
-  background: #101012 !important;
-  color: #e4e4e7;
+  color: var(--c-ink);
+}
+
+.source-editor .cm-editor {
+  background: var(--c-card);
 }
 
 .cm-editor .cm-scroller {
-  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 .cm-editor .cm-gutters {
-  background: #131316;
-  color: #52525b;
+  background: var(--c-side);
+  color: var(--c-ink-3);
+  border-right: 1px solid var(--c-line);
+}
+
+.cm-editor .cm-activeLine,
+.cm-editor .cm-activeLineGutter {
+  background: oklch(0.53 0.19 264 / 0.05);
+}
+
+.cm-editor .cm-selectionBackground,
+.cm-editor.cm-focused .cm-selectionBackground {
+  background: oklch(0.53 0.19 264 / 0.16) !important;
+}
+
+.cm-editor .cm-cursor,
+.cm-editor .cm-dropCursor {
+  border-left-color: var(--c-acc);
 }
 
 .cm-editor.cm-focused {

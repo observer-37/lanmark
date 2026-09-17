@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { TriangleAlert, X } from "lucide-react";
 import { useVaultStore } from "./stores/vault";
 import { VaultPicker } from "./components/VaultPicker";
 import { Sidebar } from "./components/Sidebar";
@@ -16,12 +17,15 @@ function Toast() {
 
   if (!error) return null;
   return (
-    <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-red-900 bg-red-950/95 p-3 text-sm text-red-200 shadow-xl">
+    <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-xl border border-red-200 bg-card p-3 text-sm text-red-600 shadow-pop">
       <div className="flex items-start gap-2">
-        <span>⚠️</span>
+        <TriangleAlert size={16} className="mt-0.5 shrink-0 text-red-500" />
         <span className="min-w-0 break-all">{error}</span>
-        <button className="ml-auto shrink-0 text-red-400 hover:text-red-200" onClick={clearError}>
-          ✕
+        <button
+          className="ml-auto shrink-0 p-0.5 text-ink-3 hover:text-ink"
+          onClick={clearError}
+        >
+          <X size={14} />
         </button>
       </div>
     </div>
@@ -41,7 +45,7 @@ function App() {
 
   if (status === "loading") {
     return (
-      <div className="flex h-screen items-center justify-center bg-zinc-950 text-zinc-500">
+      <div className="flex h-screen items-center justify-center bg-canvas text-ink-2">
         <div className="text-sm">正在打开笔记库…</div>
       </div>
     );
@@ -58,7 +62,7 @@ function App() {
 
   return (
     <>
-      <div className="flex h-screen bg-zinc-950 text-zinc-100">
+      <div className="flex h-screen bg-canvas text-ink">
         <Sidebar />
         <EditorPane />
       </div>

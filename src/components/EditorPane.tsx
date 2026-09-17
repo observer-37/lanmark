@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { BookOpen, Check, Code, Folder, NotebookText, PenLine, Star, X } from "lucide-react";
 import { Crepe, CrepeFeature } from "@milkdown/crepe";
 import { editorViewCtx } from "@milkdown/kit/core";
 import { insertImageCommand } from "@milkdown/kit/preset/commonmark";
@@ -24,15 +25,19 @@ async function getEditorView(crepe: Crepe) {
 type LMView = Awaited<ReturnType<typeof getEditorView>>;
 type LMDoc = LMView["state"]["doc"];
 
-/** WYSIWYG 编辑器宿主（Crepe）：切换笔记/模式时整体重建，避免状态残留 */
+/** WYSIWYG 编辑器宿主（Crepe）：切换笔记/模式时整体重建，避免状态残留。
+ *  readOnly=true 时为「阅读模式」：关掉斜杠菜单/块手柄/链接浮层等交互特性，
+ *  并将 ProseMirror 设为不可编辑（粘贴/拖入监听也一并跳过）。 */
 function MilkdownHost({
   content,
   notePath,
   onChange,
+  readOnly = false,
 }: {
   content: string;
   notePath: string;
   onChange: (md: string) => void;
+  readOnly?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
 
@@ -62,7 +67,7 @@ function MilkdownHost({
         root: inner,
         defaultValue: editorBody,
         features: {
-          // 精简：关掉 AI 光标 / 顶栏，保留工具栏（斜杠菜单）、代码块、表格、公式
+          // 精简：关掉 AI 光标 / 顶栏；阅读模式再关掉全部交互特性
           [CrepeFeature.AI]: false,
           [CrepeFeature.Cursor]: false,
           [CrepeFeature.TopBar]: false,
@@ -72,10 +77,10 @@ function MilkdownHost({
           [CrepeFeature.Latex]: true,
           [CrepeFeature.Table]: true,
           [CrepeFeature.CodeMirror]: true,
-          [CrepeFeature.Toolbar]: true,
-          [CrepeFeature.BlockEdit]: true,
+          [CrepeFeature.Toolbar]: !readOnly, // 斜杠菜单
+          [CrepeFeature.BlockEdit]: !readOnly, // 左侧 +/拖拽手柄
           [CrepeFeature.ListItem]: true,
-          [CrepeFeature.LinkTooltip]: true,
+          [CrepeFeature.LinkTooltip]: !readOnly,
           [CrepeFeature.Placeholder]: true,
         },
       });
@@ -95,6 +100,8 @@ function MilkdownHost({
 
       // 图片显示：文档树里相对 src → vault 协议 URL（仅改显示，不改源文件）
       view = await getEditorView(crepe);
+      // 阅读模式：ProseMirror 设为不可编辑（命令式插入仍可能绕过，故监听器也一并跳过）
+      if (readOnly) view.setProps({ editable: () => false });
       const tr = view.state.tr;
       let changed = false;
       view.state.doc.descendants((node, pos) => {
@@ -152,14 +159,16 @@ function MilkdownHost({
         void insertFiles(files);
       };
 
-      host.addEventListener("paste", onPaste);
-      host.addEventListener("dragover", onDragOver);
-      host.addEventListener("drop", onDrop);
-      (host as HTMLDivElement & { __lanmarkCleanup?: () => void }).__lanmarkCleanup = () => {
-        host.removeEventListener("paste", onPaste);
-        host.removeEventListener("dragover", onDragOver);
-        host.removeEventListener("drop", onDrop);
-      };
+      if (!readOnly) {
+        host.addEventListener("paste", onPaste);
+        host.addEventListener("dragover", onDragOver);
+        host.addEventListener("drop", onDrop);
+        (host as HTMLDivElement & { __lanmarkCleanup?: () => void }).__lanmarkCleanup = () => {
+          host.removeEventListener("paste", onPaste);
+          host.removeEventListener("dragover", onDragOver);
+          host.removeEventListener("drop", onDrop);
+        };
+      }
     })();
 
     return () => {
@@ -180,6 +189,32 @@ function MilkdownHost({
   return <div ref={hostRef} className="editor-host" />;
 }
 
+/** 模式切换按钮：纯图标 + 悬停提示（data-tip），激活态为浮起白片 */
+function ModeButton({
+  icon: Icon,
+  tip,
+  active,
+  onClick,
+}: {
+  icon: typeof BookOpen;
+  tip: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      data-tip={tip}
+      aria-label={tip}
+      className={`rounded-md px-2 py-1 ${
+        active ? "bg-card text-ink shadow-slider" : "text-ink-2 hover:text-ink"
+      }`}
+      onClick={onClick}
+    >
+      <Icon size={14} />
+    </button>
+  );
+}
+
 export function EditorPane() {
   const {
     activePath,
@@ -197,11 +232,13 @@ export function EditorPane() {
 
   if (!activePath) {
     return (
-      <main className="flex flex-1 items-center justify-center text-zinc-600">
+      <main className="flex flex-1 items-center justify-center bg-canvas text-ink-2">
         <div className="text-center">
-          <div className="mb-3 text-4xl">📝</div>
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-accent-soft text-accent-text">
+            <NotebookText size={26} />
+          </div>
           <p className="text-sm">从左侧选择笔记，或点「+ 笔记」新建</p>
-          <p className="mt-1 text-xs">
+          <p className="mt-1 text-xs text-ink-3">
             粘贴图片 / 拖入图片会自动存入 assets/
           </p>
         </div>
@@ -213,86 +250,125 @@ export function EditorPane() {
   const isFav = favorites.some((f) => f.path === activePath);
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col">
+    <main className="flex min-w-0 flex-1 flex-col bg-canvas">
       {/* 头部 */}
-      <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-2">
-        <div className="min-w-0 flex-1 truncate text-xs text-zinc-500" title={activePath}>
+      <div className="flex items-center gap-2 px-4 py-2.5">
+        <div
+          className="flex min-w-0 flex-1 items-center gap-1 truncate text-xs text-ink-3"
+          title={activePath}
+        >
+          <Folder size={13} className="shrink-0" />
           {crumbs.map((c, i) => (
-            <span key={i}>
-              {i > 0 && <span className="mx-1 opacity-50">/</span>}
-              {c}
+            <span key={i} className="flex min-w-0 items-center">
+              {i > 0 && <span className="mx-1 opacity-60">/</span>}
+              <span
+                className={`truncate ${
+                  i === crumbs.length - 1 ? "font-medium text-ink" : ""
+                }`}
+              >
+                {c}
+              </span>
             </span>
           ))}
         </div>
 
-        <span
-          className={`shrink-0 text-[11px] ${dirty ? "text-amber-400" : "text-zinc-600"}`}
-        >
-          {dirty
-            ? "未保存…"
-            : savedAt
-              ? `已保存 ${new Date(savedAt).toLocaleTimeString()}`
-              : ""}
-        </span>
+        {dirty ? (
+          <span className="flex shrink-0 items-center gap-1.5 text-[11px] text-warn">
+            <span className="h-1.5 w-1.5 rounded-full bg-warn" />
+            未保存…
+          </span>
+        ) : savedAt ? (
+          <span className="flex shrink-0 items-center gap-1 text-[11px] text-ink-2">
+            <Check size={12} className="text-ok" />
+            已保存 {new Date(savedAt).toLocaleTimeString()}
+          </span>
+        ) : null}
 
         <button
           title="收藏 / 取消收藏"
-          className={`rounded px-1.5 py-0.5 text-sm hover:bg-zinc-800 ${isFav ? "" : "opacity-50"}`}
+          className="rounded-md p-1 hover:bg-canvas"
           onClick={() => void toggleFavorite(activePath)}
         >
-          {isFav ? "⭐" : "☆"}
+          <Star
+            size={15}
+            className={isFav ? "fill-amber-400 text-amber-400" : "text-ink-3 hover:text-ink"}
+          />
         </button>
 
         <button
           onClick={() => closeNote()}
-          className="rounded px-1.5 py-0.5 text-sm text-zinc-400 hover:bg-zinc-800"
+          className="rounded-md p-1 text-ink-3 hover:bg-canvas hover:text-ink"
           title="关闭当前笔记"
         >
-          ✕
+          <X size={15} />
         </button>
 
-        <div className="flex overflow-hidden rounded-lg border border-zinc-700 text-xs">
-          <button
-            className={`px-2 py-1 ${editorMode === "wysiwyg" ? "bg-emerald-700 text-white" : "text-zinc-400 hover:bg-zinc-800"}`}
+        {/* 模式切换：阅读 / 所见即所得 / 源码（图标 + 悬停提示） */}
+        <div className="flex shrink-0 rounded-lg bg-ink/5 p-0.5 text-xs">
+          <ModeButton
+            icon={BookOpen}
+            tip="阅读模式"
+            active={editorMode === "read"}
+            onClick={() => setEditorMode("read")}
+          />
+          <ModeButton
+            icon={PenLine}
+            tip="所见即所得"
+            active={editorMode === "wysiwyg"}
             onClick={() => setEditorMode("wysiwyg")}
-          >
-            所见即所得
-          </button>
-          <button
-            className={`px-2 py-1 ${editorMode === "source" ? "bg-emerald-700 text-white" : "text-zinc-400 hover:bg-zinc-800"}`}
+          />
+          <ModeButton
+            icon={Code}
+            tip="源码模式"
+            active={editorMode === "source"}
             onClick={() => setEditorMode("source")}
-          >
-            源码
-          </button>
+          />
         </div>
       </div>
 
-      {/* 编辑区：key 强制按笔记+模式重建编辑器 */}
-      <div className="min-h-0 flex-1">
-        {editorMode === "wysiwyg" ? (
-          <MilkdownHost
-            key={`${activePath}|wysiwyg`}
-            content={content}
-            notePath={activePath}
-            onChange={(md) => {
-              setContent(md);
-              scheduleSave();
-            }}
-          />
-        ) : (
-          <CodeMirror
-            key={`${activePath}|source`}
-            value={content}
-            height="100%"
-            style={{ height: "100%" }}
-            extensions={[markdown()]}
-            onChange={(value) => {
-              setContent(value);
-              scheduleSave();
-            }}
-            basicSetup={{ lineNumbers: true, foldGutter: true }}
-          />
-        )}
+      {/* 编辑区：内容浮在冷白画布上的白色纸卡；key 强制按笔记+模式重建编辑器 */}
+      <div className="min-h-0 flex-1 px-4 pb-3">
+        <div
+          className={`h-full overflow-hidden rounded-xl border border-line bg-card shadow-card ${
+            editorMode === "source" ? "source-editor" : ""
+          } ${editorMode === "read" ? "reading" : ""}`}
+        >
+          {editorMode === "read" ? (
+            <MilkdownHost
+              key={`${activePath}|read`}
+              content={content}
+              notePath={activePath}
+              onChange={(md) => {
+                setContent(md);
+                scheduleSave();
+              }}
+              readOnly
+            />
+          ) : editorMode === "wysiwyg" ? (
+            <MilkdownHost
+              key={`${activePath}|wysiwyg`}
+              content={content}
+              notePath={activePath}
+              onChange={(md) => {
+                setContent(md);
+                scheduleSave();
+              }}
+            />
+          ) : (
+            <CodeMirror
+              key={`${activePath}|source`}
+              value={content}
+              height="100%"
+              style={{ height: "100%" }}
+              extensions={[markdown()]}
+              onChange={(value) => {
+                setContent(value);
+                scheduleSave();
+              }}
+              basicSetup={{ lineNumbers: true, foldGutter: true }}
+            />
+          )}
+        </div>
       </div>
     </main>
   );

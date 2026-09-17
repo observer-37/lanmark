@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
+import { FileText, FolderPlus, History, Plus, RefreshCw, Search, Star } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import { TreeView } from "./TreeView";
 import type { PathTitle } from "../lib/vault";
+
+function SectionLabel({ children }: { children: string }) {
+  return (
+    <div className="mb-1 mt-4 px-3 text-[11px] font-medium text-ink-3">{children}</div>
+  );
+}
 
 function MetaList({
   items,
@@ -13,23 +20,23 @@ function MetaList({
   starred?: boolean;
 }) {
   return (
-    <ul className="space-y-px">
+    <ul className="space-y-0.5">
       {items.map((it) => (
         <li key={it.path}>
           <button
             onClick={() => onOpen(it.path)}
-            className="flex w-full items-center gap-1.5 rounded-md px-3 py-1.5 text-left text-sm text-zinc-300 hover:bg-zinc-800/70"
+            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm text-ink-2 hover:bg-canvas hover:text-ink"
           >
-            <span className="w-4 shrink-0 text-center text-xs opacity-70">
-              {starred ? "⭐" : "🕘"}
-            </span>
+            {starred ? (
+              <Star size={13} className="shrink-0 fill-amber-400 text-amber-400" />
+            ) : (
+              <History size={13} className="shrink-0 text-ink-3" />
+            )}
             <span className="min-w-0 flex-1 truncate">{it.title}</span>
           </button>
         </li>
       ))}
-      {items.length === 0 && (
-        <li className="px-3 py-1 text-xs text-zinc-600">暂无</li>
-      )}
+      {items.length === 0 && <li className="px-3 py-1 text-xs text-ink-3">暂无</li>}
     </ul>
   );
 }
@@ -58,41 +65,46 @@ export function Sidebar() {
   }, [q, doSearch]);
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/40">
+    <aside className="flex w-72 shrink-0 flex-col border-r border-line bg-side">
       {/* 头部 */}
-      <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-2.5">
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-sm font-bold">
+      <div className="flex items-center gap-2 px-3 py-3">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent text-sm font-bold text-white shadow-slider">
           L
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold">Lanmark</div>
-          <div className="truncate text-[11px] text-zinc-500" title={vaultPath ?? ""}>
+          <div className="text-sm font-semibold text-ink">Lanmark</div>
+          <div className="truncate text-[11px] text-ink-3" title={vaultPath ?? ""}>
             {vaultPath ?? ""}
           </div>
         </div>
         <button
           title="重新扫描 vault（外部改动后点这个）"
-          className="rounded px-1.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
+          className="rounded-md p-1.5 text-ink-3 hover:bg-canvas hover:text-ink"
           onClick={() => void reindex()}
         >
-          ⟳
+          <RefreshCw size={14} />
         </button>
       </div>
 
-      {/* 搜索框 */}
-      <div className="px-3 pt-3">
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="🔍 搜索笔记（标题或正文）…"
-          className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm outline-none placeholder:text-zinc-600 focus:border-emerald-600"
-        />
+      {/* 搜索框：白卡 + focus 靛蓝柔 ring */}
+      <div className="px-3 pt-1">
+        <div className="relative">
+          <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-3">
+            <Search size={14} />
+          </span>
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="搜索笔记…"
+            className="w-full rounded-[10px] border border-line bg-card py-1.5 pl-8 pr-3 text-sm text-ink shadow-card outline-none placeholder:text-ink-3 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+          />
+        </div>
       </div>
 
-      <div className="mt-2 flex-1 overflow-y-auto px-1 pb-4">
+      <div className="mt-1 flex-1 overflow-y-auto px-2 pb-3">
         {q.trim() ? (
           /* 搜索结果 */
-          <ul className="space-y-1">
+          <ul className="space-y-0.5">
             {searchResults.map((r) => (
               <li key={r.path}>
                 <button
@@ -101,17 +113,17 @@ export function Sidebar() {
                     setQ("");
                     doSearch("");
                   }}
-                  className="w-full rounded-lg px-3 py-2 text-left hover:bg-zinc-800/70"
+                  className="w-full rounded-lg px-2.5 py-2 text-left hover:bg-canvas"
                 >
-                  <div className="truncate text-sm text-zinc-200">{r.title}</div>
-                  <div className="mt-0.5 line-clamp-2 text-xs text-zinc-500">
+                  <div className="truncate text-sm text-ink">{r.title}</div>
+                  <div className="mt-0.5 line-clamp-2 text-xs text-ink-3">
                     {r.snippet || r.path}
                   </div>
                 </button>
               </li>
             ))}
             {searchResults.length === 0 && (
-              <li className="px-3 py-4 text-center text-xs text-zinc-600">
+              <li className="px-3 py-4 text-center text-xs text-ink-3">
                 没有匹配「{q}」的笔记
               </li>
             )}
@@ -119,36 +131,32 @@ export function Sidebar() {
         ) : (
           <>
             {/* 收藏 */}
-            <div className="mb-1 mt-1 px-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-              ⭐ 收藏
-            </div>
+            <SectionLabel>收藏</SectionLabel>
             <MetaList items={favorites} starred onOpen={(p) => void openNote(p)} />
 
             {/* 最近 */}
-            <div className="mb-1 mt-4 px-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-              🕘 最近
-            </div>
+            <SectionLabel>最近</SectionLabel>
             <MetaList items={recents} onOpen={(p) => void openNote(p)} />
 
-            {/* 笔记本树 */}
-            <div className="mb-1 mt-4 flex items-center justify-between px-3">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
-                📁 笔记本
-              </span>
-              <span className="flex gap-1">
+            {/* 笔记本树：新建入口统一在标题右侧（交互修正，见 design/direction-approved.md） */}
+            <div className="mb-1 mt-4 flex items-center justify-between pl-3 pr-1">
+              <span className="text-[11px] font-medium text-ink-3">笔记本</span>
+              <span className="flex gap-0.5">
                 <button
                   title="在根目录新建笔记"
-                  className="rounded px-1 text-xs text-zinc-400 hover:bg-zinc-800"
+                  className="flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink"
                   onClick={() => void createNote("")}
                 >
-                  + 笔记
+                  <Plus size={12} />
+                  笔记
                 </button>
                 <button
                   title="在根目录新建文件夹"
-                  className="rounded px-1 text-xs text-zinc-400 hover:bg-zinc-800"
+                  className="flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] text-ink-3 hover:bg-canvas hover:text-ink"
                   onClick={() => void createFolder("")}
                 >
-                  + 文件夹
+                  <FolderPlus size={12} />
+                  文件夹
                 </button>
               </span>
             </div>
@@ -158,8 +166,9 @@ export function Sidebar() {
       </div>
 
       {activePath && (
-        <div className="border-t border-zinc-800 px-3 py-2 text-[11px] text-zinc-600">
-          当前：{activePath}
+        <div className="flex items-center gap-1.5 border-t border-line px-3 py-2 text-[11px] text-ink-3">
+          <FileText size={12} />
+          <span className="min-w-0 truncate">{activePath}</span>
         </div>
       )}
     </aside>

@@ -13,7 +13,7 @@ interface VaultStore {
   content: string;
   dirty: boolean;
   savedAt: number | null;
-  editorMode: "wysiwyg" | "source";
+  editorMode: "read" | "wysiwyg" | "source";
   renamingPath: string | null;
   searchQuery: string;
   searchResults: SearchHit[];
@@ -31,7 +31,7 @@ interface VaultStore {
   setContent: (content: string) => void;
   scheduleSave: () => void;
   saveNow: () => Promise<boolean>;
-  setEditorMode: (m: "wysiwyg" | "source") => void;
+  setEditorMode: (m: "read" | "wysiwyg" | "source") => void;
   setRenaming: (path: string | null) => void;
   createNote: (dir: string) => Promise<void>;
   createFolder: (dir: string) => Promise<void>;

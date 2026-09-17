@@ -1,9 +1,26 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  FileText,
+  Folder,
+  FolderPlus,
+  Pencil,
+  Star,
+  Trash2,
+} from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import type { VaultNode } from "../lib/vault";
 
 interface Props {
   tree: VaultNode[];
+}
+
+/* 文件夹彩色编码：按顶层目录名散列取色（绿/琥珀/蓝循环），承载「这是哪个分区」的信息 */
+const FOLDER_HUES = ["var(--c-fd-1)", "var(--c-fd-2)", "var(--c-fd-3)"];
+function folderHue(path: string): string {
+  const root = path.split("/")[0];
+  let h = 0;
+  for (let i = 0; i < root.length; i++) h = (h * 31 + root.charCodeAt(i)) >>> 0;
+  return FOLDER_HUES[h % FOLDER_HUES.length];
 }
 
 /**
@@ -35,7 +52,7 @@ function RenameInput({
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
       onClick={(e) => e.stopPropagation()}
-      className="w-full min-w-0 rounded border border-emerald-600 bg-zinc-900 px-1 py-0.5 text-sm outline-none"
+      className="w-full min-w-0 rounded-md border border-accent bg-card px-1.5 py-0.5 text-sm text-ink outline-none focus:ring-2 focus:ring-accent/20"
       onFocus={(e) => e.target.select()}
       onBlur={commit}
       onKeyDown={(e) => {
@@ -51,7 +68,32 @@ function RenameInput({
   );
 }
 
-/** 目录树：扁平渲染（深度 = 路径段数），hover 显示操作，支持内联重命名 */
+/** 右键菜单项（C 风格：图标 + 文字，白卡浮层） */
+function MenuItem({
+  icon: Icon,
+  label,
+  danger,
+  onClick,
+}: {
+  icon: typeof Star;
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-canvas ${
+        danger ? "text-red-600" : "text-ink"
+      }`}
+      onClick={onClick}
+    >
+      <Icon size={14} className={danger ? "text-red-500" : "text-ink-3"} />
+      {label}
+    </button>
+  );
+}
+
+/** 目录树：扁平渲染（深度 = 路径段数），hover 显示操作，支持内联重命名与右键菜单 */
 export function TreeView({ tree }: Props) {
   const activePath = useVaultStore((s) => s.activePath);
   const favorites = useVaultStore((s) => s.favorites);
@@ -66,11 +108,51 @@ export function TreeView({ tree }: Props) {
 
   const favSet = new Set(favorites.map((f) => f.path));
 
+  // 右键上下文菜单（VSCode 式：新建入口在分区标题，行级操作在菜单里）
+  const [menu, setMenu] = useState<{ x: number; y: number; node: VaultNode } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    // 捕获阶段监听：点菜单外任意处（含其它行）先关菜单
+    const onDown = (e: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [menu]);
+
+  const openMenu = (e: React.MouseEvent, node: VaultNode) => {
+    e.preventDefault();
+    // 视口内收口，避免菜单贴边溢出
+    const x = Math.max(8, Math.min(e.clientX, window.innerWidth - 190));
+    const y = Math.max(8, Math.min(e.clientY, window.innerHeight - 260));
+    setMenu({ x, y, node });
+  };
+
+  const closeAnd = (fn: () => void) => {
+    setMenu(null);
+    fn();
+  };
+
   return (
-    <ul className="space-y-px">
+    <>
+    <ul className="space-y-0.5">
       {tree.length === 0 && (
-        <li className="px-3 py-2 text-xs text-zinc-600">
-          库是空的，点下面「+ 笔记」开始
+        <li className="px-3 py-2 text-xs text-ink-3">
+          库是空的，点上方「+ 笔记」开始，或右键文件夹新建
         </li>
       )}
       {tree.map((node) => {
@@ -78,21 +160,27 @@ export function TreeView({ tree }: Props) {
         const isNote = node.kind === "note";
         const isActive = node.path === activePath;
         const isRenaming = node.path === renamingPath;
+        const isFav = favSet.has(node.path);
 
         return (
           <li key={node.path} className="group">
             <div
-              className={`flex cursor-pointer items-center gap-1 rounded-md pr-1 hover:bg-zinc-800/70 ${
-                isActive ? "bg-zinc-800 text-zinc-50" : "text-zinc-300"
+              className={`flex cursor-pointer items-center gap-1.5 rounded-lg py-1.5 pr-1 hover:bg-canvas ${
+                isActive
+                  ? "bg-accent-soft font-medium text-accent-text"
+                  : "text-ink"
               }`}
               style={{ paddingLeft: depth * 14 + 8 }}
               onClick={() => {
                 if (isNote && !isRenaming) void openNote(node.path);
               }}
+              onContextMenu={(e) => openMenu(e, node)}
             >
-              <span className="w-4 shrink-0 text-center text-xs opacity-70">
-                {isNote ? "📄" : "📁"}
-              </span>
+              {isNote ? (
+                <FileText size={14} className="shrink-0 text-ink-3" />
+              ) : (
+                <Folder size={15} className="shrink-0" style={{ color: folderHue(node.path) }} />
+              )}
 
               {isRenaming ? (
                 <RenameInput
@@ -103,84 +191,100 @@ export function TreeView({ tree }: Props) {
                   onCancel={() => setRenaming(null)}
                 />
               ) : (
-                <span className="min-w-0 flex-1 truncate text-sm">
-                  {node.name}
-                </span>
+                <span className="min-w-0 flex-1 truncate text-sm">{node.name}</span>
               )}
 
               {!isRenaming && (
-                <span className="hidden shrink-0 gap-0.5 group-hover:flex">
+                <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
                   {isNote && (
                     <>
                       <button
-                        title={favSet.has(node.path) ? "取消收藏" : "收藏"}
-                        className="rounded px-1 text-xs hover:bg-zinc-700"
+                        title={isFav ? "取消收藏" : "收藏"}
+                        className="rounded-md p-1 hover:bg-line/60"
                         onClick={(e) => {
                           e.stopPropagation();
                           void toggleFavorite(node.path);
                         }}
                       >
-                        {favSet.has(node.path) ? "⭐" : "☆"}
+                        <Star
+                          size={13}
+                          className={isFav ? "fill-amber-400 text-amber-400" : "text-ink-3"}
+                        />
                       </button>
                       <button
                         title="重命名"
-                        className="rounded px-1 text-xs hover:bg-zinc-700"
+                        className="rounded-md p-1 hover:bg-line/60"
                         onClick={(e) => {
                           e.stopPropagation();
                           setRenaming(node.path);
                         }}
                       >
-                        ✎
+                        <Pencil size={13} className="text-ink-3" />
                       </button>
                     </>
                   )}
                   <button
                     title="删除（移入回收站）"
-                    className="rounded px-1 text-xs hover:bg-zinc-700"
+                    className="rounded-md p-1 hover:bg-line/60"
                     onClick={(e) => {
                       e.stopPropagation();
                       void deleteNode(node.path);
                     }}
                   >
-                    🗑
+                    <Trash2 size={13} className="text-ink-3 hover:text-red-500" />
                   </button>
                 </span>
               )}
             </div>
-
-            {/* 文件夹/笔记行下方的快捷操作（hover 显示） */}
-            {!isRenaming && (
-              <div
-                className="hidden group-hover:flex items-center gap-1 pr-1"
-                style={{ paddingLeft: depth * 14 + 26 }}
-              >
-                <button
-                  title="新建笔记"
-                  className="rounded px-1 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void createNote(node.kind === "folder" ? node.path : "");
-                  }}
-                >
-                  + 笔记
-                </button>
-                {node.kind === "folder" && (
-                  <button
-                    title="新建子文件夹"
-                    className="rounded px-1 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void createFolder(node.path);
-                    }}
-                  >
-                    + 文件夹
-                  </button>
-                )}
-              </div>
-            )}
           </li>
         );
       })}
-    </ul>
+      </ul>
+
+      {/* 右键上下文菜单（VSCode 式：文件夹可新建子项，行级操作集中在此） */}
+      {menu && (
+        <div
+          ref={menuRef}
+          className="fixed z-50 min-w-[11rem] rounded-xl border border-line bg-card py-1 shadow-pop"
+          style={{ left: menu.x, top: menu.y }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          {menu.node.kind === "folder" && (
+            <>
+              <MenuItem
+                icon={FileText}
+                label="新建笔记"
+                onClick={() => closeAnd(() => void createNote(menu.node.path))}
+              />
+              <MenuItem
+                icon={FolderPlus}
+                label="新建文件夹"
+                onClick={() => closeAnd(() => void createFolder(menu.node.path))}
+              />
+              <div className="my-1 h-px bg-line" />
+            </>
+          )}
+          <MenuItem
+            icon={Pencil}
+            label="重命名"
+            onClick={() => closeAnd(() => setRenaming(menu.node.path))}
+          />
+          {menu.node.kind === "note" && (
+            <MenuItem
+              icon={Star}
+              label={favSet.has(menu.node.path) ? "取消收藏" : "收藏"}
+              onClick={() => closeAnd(() => void toggleFavorite(menu.node.path))}
+            />
+          )}
+          <div className="my-1 h-px bg-line" />
+          <MenuItem
+            icon={Trash2}
+            label="删除（移入回收站）"
+            danger
+            onClick={() => closeAnd(() => void deleteNode(menu.node.path))}
+          />
+        </div>
+      )}
+    </>
   );
 }
