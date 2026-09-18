@@ -12,7 +12,7 @@ export XDG_DATA_HOME="$WS/.cache/data"
 export XDG_CONFIG_HOME="$WS/.cache/config"
 export npm_config_cache="$WS/.cache/npm"
 
-# Temurin JDK 21（Gradle 8.9 不支持 JDK 26）
+# Temurin JDK 21（本机 JDK 26 与 Gradle 8.14 不兼容，见 AGENTS.md 硬约定 1）
 jdk="$(ls -d "$WS"/.cache/jdk/jdk-21* 2>/dev/null | head -n1)"
 if [ -n "$jdk" ]; then
   export JAVA_HOME="$jdk"

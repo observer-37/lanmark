@@ -7,7 +7,7 @@ Tauri 2 + React 19 + TS + Tailwind v4 + Zustand，一套 Rust core 跑三端。
 
 | 位置 | 内容 |
 |---|---|
-| `src/components` · `src/stores` · `src/lib` | 界面（Sidebar/TreeView/EditorPane/SyncSection）· Zustand 状态（vault/sync/bridge）· 纯逻辑 + 前端测试（vault-url/frontmatter/wikilink） |
+| `src/components` · `src/stores` · `src/lib` | 界面（Sidebar/TreeView/EditorPane/SyncSection）· Zustand 状态（vault/sync，各有 store 测试）· 纯逻辑 + 前端测试（vault-url 图片引用换算/frontmatter/wikilink） |
 | `src/index.css` | 设计 token（`:root` + `@theme`，「晨窗」浅色）与**全部 Crepe 主题覆盖**，改编辑器外观先来这里 |
 | `src-tauri/src` | Rust core：`commands.rs`（IPC 入口，`xxx` 是 3 行封装、`xxx_op` 是可测纯逻辑）· `fs_ops`/`db`/`vault` · `protocol`（`vault://` 图片协议）· `sync_server`/`sync_client`/`sync`/`protocol` · `mobile`（SAF 选库 + 文件授权）· `sanitize`（文件名规则） |
 | `src-tauri/gen/android` | **手工维护的 Android 工程**（SyncService.kt 前台服务、MainActivity.kt SAF、build.gradle.kts 钉 build-tools 34），已入库，见硬约定 2 |
@@ -31,7 +31,7 @@ Tauri 2 + React 19 + TS + Tailwind v4 + Zustand，一套 Rust core 跑三端。
 
 1. **工具链与缓存一律进仓库 `.cache/`**（pnpm store/cargo/JDK/SDK/gradle），不污染 `$HOME`；新增缓存照此办（env.sh 已处理，别绕过）。
 2. **`gen/android` 是手工改的，删目录重 init 会丢工作**：`tauri android build/dev` 对已存在文件只读不写（手改安全），但删掉重 init 会冲掉 SyncService/SAF 代码。
-3. **往返保真是硬门槛**：打开笔记不得重写文件（Crepe 建实例会发一次伪 `markdownUpdated`，`MilkdownHost` 的 `lastKnownDoc` 基线专门压它）；frontmatter 与 wikilink 不进编辑器、保存时回填还原；图片显示走 `vault://`、落盘还原相对引用。动 `EditorPane.tsx`/`src/milkdown`/`lib/image` 前先读 `docs/04` §8–§9c，`pnpm test` 的 roundtrip/往返用例就是护栏。
+3. **往返保真是硬门槛**：打开笔记不得重写文件（Crepe 建实例会发一次伪 `markdownUpdated`，`MilkdownHost` 的 `lastKnownDoc` 基线专门压它）；frontmatter 与 wikilink 不进编辑器、保存时回填还原；图片显示走 `vault://`、落盘还原相对引用。动 `EditorPane.tsx`/`src/milkdown`/`lib/vault-url`（图片引用换算）前先读 `docs/04` §8–§9c，`pnpm test` 的 roundtrip/往返用例就是护栏。
 4. **vault 文件是唯一事实源**；`db.rs` 的 SQLite 只是可重建索引（含正文搜索缓存）。任何「数据」改动先问文件侧怎么表达。
 5. **同步方向固定**：手机 = axum 服务器（`0.0.0.0:4180`，被占则 +1），桌面 = 客户端；JSON over HTTP，文件级 sha256 版本对比，冲突保留双份（`docs/05` §3）。
 6. **窄屏断点是双源**：JS `useIsNarrow`（`innerWidth < 768`，`App.tsx`）与 CSS `@media (max-width: 767.98px)`（`index.css`），必须同步改。

@@ -105,6 +105,32 @@ describe("Milkdown 往返保真（M1 决策门）", () => {
     expect(normalize(out)).toBe(normalize(md));
   });
 
+  it("任务列表（- [ ] / - [x]——§9c 事故触发形态，此前护栏缺 case）", async () => {
+    const md = ["# 待办", "", "- [ ] 未完成项", "- [x] 已完成项", "", "普通列表：", "- 普通项一", "- 普通项二"].join("\n");
+    const out = await roundtrip(md);
+    expect(semantic(out)).toBe(semantic(md));
+    // 勾选状态不得丢失
+    expect(out).toContain("[x]");
+    expect(out).toMatch(/\[\s\]/);
+  });
+
+  it("Latex 行内公式 $…$ 字节级往返（产品开启 CrepeFeature.Latex）", async () => {
+    const md = ["# 数学", "", "行内公式 $E = mc^2$ 在此。", "", "结尾。"].join("\n");
+    const out = await roundtrip(md);
+    expect(normalize(out)).toBe(normalize(md));
+  });
+
+  it("Latex 显示公式 $$…$$：内容保留，但被降级为行内 $…$（已知上游限制）", async () => {
+    // 已知限制（Crepe 上游，非本项目代码）：块公式经 WYSIWYG 保存后
+    // 丢失 display 区分，$$…$$ → $…$（公式内容完整保留，仅渲染从居中块变行内）。
+    // 根因：Crepe 的 latex 序列化路径未保留 display 标志（block-latex.ts
+    // addNode('math',…)）。候选修复：pnpm patch @milkdown/crepe，需真机验证
+    // 编辑器 KaTeX 预览后跟进；在此之前用本用例钉住现状防止行为漂移。
+    const md = ["# 数学", "", "显示公式：", "", "$$\\int_0^1 x\\,dx = \\frac{1}{2}$$", "", "结尾。"].join("\n");
+    const out = await roundtrip(md);
+    expect(normalize(out)).toBe(normalize("# 数学\n\n显示公式：\n\n$\\int_0^1 x\\,dx = \\frac{1}{2}$\n\n结尾。"));
+  });
+
   it("GFM 表格", async () => {
     const md = [
       "# 表格",
