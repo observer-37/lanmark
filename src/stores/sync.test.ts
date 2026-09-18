@@ -11,6 +11,9 @@ const m = vi.hoisted(() => ({
   syncNow: vi.fn(),
   readNote: vi.fn(),
   vaultSetState: vi.fn(),
+  isAndroidFlag: false,
+  hasAllFilesAccess: vi.fn(),
+  requestAllFilesAccess: vi.fn(),
   vaultState: {
     dirty: false,
     activePath: null as string | null,
@@ -38,11 +41,11 @@ vi.mock("../lib/sync", () => ({
     serverRemove: vi.fn(),
   },
   vaultPicker: {
-    hasAllFilesAccess: vi.fn(),
-    requestAllFilesAccess: vi.fn(),
+    hasAllFilesAccess: m.hasAllFilesAccess,
+    requestAllFilesAccess: m.requestAllFilesAccess,
     pickFolder: vi.fn(),
   },
-  isAndroid: () => false,
+  isAndroid: () => m.isAndroidFlag,
 }));
 
 import { useSyncStore } from "./sync";
@@ -141,5 +144,32 @@ describe("syncNow 与 vault store 衔接", () => {
 
     expect(m.vaultSetState).not.toHaveBeenCalled();
     expect(useSyncStore.getState().error).toBeNull();
+  });
+});
+
+describe("Android 授权状态（VaultPicker 订阅源）", () => {
+  beforeEach(() => {
+    m.isAndroidFlag = true;
+    useSyncStore.setState({ hasAllFilesAccess: false });
+  });
+
+  it("checkAllFilesAccess 把授权结果写入可订阅字段", async () => {
+    m.hasAllFilesAccess.mockResolvedValueOnce(true);
+    const ok = await useSyncStore.getState().checkAllFilesAccess();
+    expect(ok).toBe(true);
+    expect(useSyncStore.getState().hasAllFilesAccess).toBe(true);
+  });
+
+  it("未授权时保持 false（组件据此渲染「去授权」）", async () => {
+    m.hasAllFilesAccess.mockResolvedValueOnce(false);
+    await useSyncStore.getState().checkAllFilesAccess();
+    expect(useSyncStore.getState().hasAllFilesAccess).toBe(false);
+  });
+
+  it("非 Android 平台直接放行（不发插件调用）", async () => {
+    m.isAndroidFlag = false;
+    const ok = await useSyncStore.getState().checkAllFilesAccess();
+    expect(ok).toBe(true);
+    expect(m.hasAllFilesAccess).not.toHaveBeenCalled();
   });
 });

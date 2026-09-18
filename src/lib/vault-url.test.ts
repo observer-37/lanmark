@@ -75,7 +75,7 @@ describe("特殊字符文件名（' ( ) !——此前 URL 在这些字符处被�
   it("toVaultUrl/fromVaultUrl 对称", () => {
     for (const name of ["a/b'c/x.png", "d/e(f).png", "g/h!i.png", "截图 (最终)'v2.png"]) {
       const url = toVaultUrl(name);
-      expect(url).not.toMatch(/[!'()]/, "生成的 URL 不应含裸特殊字符: " + url);
+      expect(url.match(/[!'()]/)).toBeNull(); // 生成的 URL 不含裸特殊字符
       expect(fromVaultUrl(url)).toBe(name);
     }
   });

@@ -18,6 +18,9 @@ export function VaultPicker() {
   const clearError = useVaultStore((s) => s.clearError);
   const checkAllFilesAccess = useSyncStore((s) => s.checkAllFilesAccess);
   const requestAllFilesAccess = useSyncStore((s) => s.requestAllFilesAccess);
+  // 必须订阅：此前 render 里 getState() 非响应式读取，从系统授权页返回后
+  // 组件不重渲染，「打开此目录」永远 disabled（只能重启 App）
+  const hasAllFilesAccess = useSyncStore((s) => s.hasAllFilesAccess);
   const [android] = useState(isAndroid());
   const [customPath, setCustomPath] = useState("");
   const [showCustom, setShowCustom] = useState(false);
@@ -25,6 +28,18 @@ export function VaultPicker() {
   // Android：进首启页即查授权状态（自定义路径需要；应用目录不需要）
   useEffect(() => {
     if (android) void checkAllFilesAccess();
+  }, [android, checkAllFilesAccess]);
+
+  // 从系统授权设置页返回时自动复查（activity 返回不会重跑挂载 effect）
+  useEffect(() => {
+    if (!android) return;
+    const recheck = () => void checkAllFilesAccess();
+    document.addEventListener("visibilitychange", recheck);
+    window.addEventListener("focus", recheck);
+    return () => {
+      document.removeEventListener("visibilitychange", recheck);
+      window.removeEventListener("focus", recheck);
+    };
   }, [android, checkAllFilesAccess]);
 
   return (
@@ -78,7 +93,7 @@ export function VaultPicker() {
                   </p>
                   <div className="flex gap-1.5">
                     <button
-                      disabled={!customPath.trim() || !useSyncStore.getState().hasAllFilesAccess}
+                      disabled={!customPath.trim() || !hasAllFilesAccess}
                       onClick={() => {
                         clearError();
                         void pickCustomAndroidDir(customPath.trim(), "open");
@@ -87,7 +102,7 @@ export function VaultPicker() {
                     >
                       打开此目录
                     </button>
-                    {!useSyncStore.getState().hasAllFilesAccess && (
+                    {!hasAllFilesAccess && (
                       <button
                         onClick={() => void requestAllFilesAccess()}
                         className="rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-white"
