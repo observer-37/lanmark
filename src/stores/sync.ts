@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { vault } from "../lib/vault";
 import {
   sync,
   vaultPicker,
@@ -8,6 +9,7 @@ import {
   type SyncPairingInfo,
   type SyncReport,
 } from "../lib/sync";
+import { useVaultStore } from "./vault";
 
 /**
  * M2 同步状态。手机端：展示服务器/配对码；桌面端：发现/配对/手动同步。
@@ -103,8 +105,35 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   syncNow: async (id) => {
     set({ syncing: true, error: null });
     try {
+      const vs = useVaultStore.getState();
+      // 同步前先落盘未保存编辑：否则拉取覆盖磁盘后，用户下一次自动保存
+      // 会用「旧内容+改动」覆盖刚拉下来的版本（跨设备 last-write-wins 丢数据）
+      if (vs.dirty && vs.activePath) {
+        if (!(await vs.saveNow())) {
+          set({ error: "保存未完成的修改失败，已中止同步以免覆盖它" });
+          return;
+        }
+      }
       const report = await sync.syncNow(id);
       set({ lastReport: report });
+      // 同步后刷新树/元数据（拉取的新文件无需手动「重新扫描」），
+      // 并重载当前笔记（磁盘可能已被拉取更新）
+      await vs.refreshTree();
+      await vs.refreshMeta();
+      const s = useVaultStore.getState();
+      const active = s.activePath;
+      if (active && !s.dirty) {
+        // dirty（同步期间开始输入）时不重载，避免吞掉正在进行的编辑；
+        // 该残余窗口以「同步前已 flush」为主防线
+        try {
+          const { content } = await vault.readNote(active);
+          if (content !== s.content) {
+            useVaultStore.setState({ content, dirty: false, savedAt: Date.now() });
+          }
+        } catch {
+          // 文件被对端删除等：保留当前状态
+        }
+      }
     } catch (e) {
       set({ error: String(e) });
     } finally {
