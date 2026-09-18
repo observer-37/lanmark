@@ -32,7 +32,7 @@ describe("splitFrontmatter", () => {
   });
 
   it("--- 后多个空行被消耗（已知行为：join 只回一个换行）", () => {
-    const { fm, body } = splitFrontmatter("---\ntitle: x\n---\n\n\n正文");
+    const { body } = splitFrontmatter("---\ntitle: x\n---\n\n\n正文");
     expect(body).toBe("正文");
     // 该损耗只发生在 WYSIWYG 真实编辑保存后（正文反正被重序列化）；
     // 源码模式 / 未编辑打开不受影响
