@@ -51,6 +51,9 @@ interface VaultStore {
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+// openNote 单调序号：快速连开/开+关并发时，慢的旧响应不得覆盖新状态
+// （错位后用户编辑会把 A 的内容存进 B 的文件）
+let openSeq = 0;
 
 export const useVaultStore = create<VaultStore>((set, get) => ({
   status: "loading",
@@ -181,16 +184,21 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   openNote: async (path, silent = false) => {
-    // 切换前先把未保存的旧笔记落盘
+    const seq = ++openSeq;
+    // 切换前先把未保存的旧笔记落盘；失败则中止切换（未保存编辑不丢铁律，
+    // 与 deleteNode 同守卫——error 已由 saveNow 提示）
     if (get().dirty && get().activePath) {
       await get().saveNow();
+      if (get().dirty && get().activePath) return;
     }
+    if (seq !== openSeq) return; // 期间又有新的 open/close
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
     }
     try {
       const { content } = await vault.readNote(path);
+      if (seq !== openSeq) return; // 慢响应：丢弃，避免 activePath 与 content 错位
       set({ activePath: path, content, dirty: false, savedAt: null, renamingPath: null, searchQuery: "" });
       await get().refreshMeta();
     } catch (e) {
@@ -199,9 +207,11 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   closeNote: async () => {
-    // 关闭前落盘（数据不丢铁律）
+    openSeq++; // 使在途 openNote 失效（关了就不该被慢响应重新打开）
+    // 关闭前落盘（数据不丢铁律）；失败则保留笔记打开，内容不丢
     if (get().dirty && get().activePath) {
       await get().saveNow();
+      if (get().dirty && get().activePath) return;
     }
     if (saveTimer) {
       clearTimeout(saveTimer);
