@@ -71,6 +71,31 @@ describe("toVaultUrl / fromVaultUrl", () => {
   });
 });
 
+describe("特殊字符文件名（' ( ) !——此前 URL 在这些字符处被截断写坏引用）", () => {
+  it("toVaultUrl/fromVaultUrl 对称", () => {
+    for (const name of ["a/b'c/x.png", "d/e(f).png", "g/h!i.png", "截图 (最终)'v2.png"]) {
+      const url = toVaultUrl(name);
+      expect(url).not.toMatch(/[!'()]/, "生成的 URL 不应含裸特殊字符: " + url);
+      expect(fromVaultUrl(url)).toBe(name);
+    }
+  });
+
+  it("图片引用正确还原（回归：截断路径曾产出错误的 .. 层数）", () => {
+    const md = `![](${toVaultUrl("a/b'c/x.png")})`;
+    expect(vaultUrlsToRelative(md, "a/b")).toBe("![](../b'c/x.png)");
+  });
+
+  it("正文手写的 vault:// 文本不得被改写（回归：此前全局正则静默改写）", () => {
+    const text = "见 vault://localhost/工作/笔记.md 这里";
+    expect(vaultUrlsToRelative(text, "工作")).toBe(text);
+  });
+
+  it("链接（非图片）src 中的 vault URL 也还原", () => {
+    const md = `[链接](${toVaultUrl("工作/笔记.md")})`;
+    expect(vaultUrlsToRelative(md, "工作")).toBe("[链接](笔记.md)");
+  });
+});
+
 describe("vaultUrlsToRelative（保存时 URL → 笔记相对引用）", () => {
   it("子目录笔记的根资源 → ../ 引用", () => {
     const md = `文字\n\n![](${toVaultUrl("assets/x.png")})\n`;

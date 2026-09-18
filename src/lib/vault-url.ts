@@ -55,7 +55,12 @@ export function toVaultUrl(vaultRel: string): string {
     vaultRel
       .split("/")
       .filter(Boolean)
-      .map(encodeURIComponent)
+      .map((seg) =>
+        // encodeURIComponent 不转义 ' ! ( ) ~；其中 ' ) 会让保存期还原正则
+        // [^\s)"']+ 在段中间截断 URL（文件名含特殊字符时引用写坏）。
+        // 补齐转义，保证生成的 URL 不含裸空白/括号/引号
+        encodeURIComponent(seg).replace(/[!'()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase()),
+      )
       .join("/")
   );
 }
@@ -81,14 +86,22 @@ export function fromVaultUrl(src: string): string {
 }
 
 /**
- * 保存前：markdown 中的 vault 协议 URL → 相对笔记目录的引用（Obsidian 约定）。
- * 例：笔记在 工作/ 下，图在根 assets/ → URL 还原为 ../assets/x.png
+ * 保存前：markdown 图片/链接 src 中的 vault 协议 URL → 相对笔记目录的引用
+ * （Obsidian 约定）。例：笔记在 工作/ 下，图在根 assets/ → URL 还原为 ../assets/x.png
+ *
+ * 只替换 image/link 的 src 位置：正文里用户手写的 vault:// 文本不得被改写
+ * （此前全局正则会把它当 URL 还原，保存后文本损坏）。
+ * toVaultUrl 已保证 URL 不含裸空白/括号，故 src 用 [^()\s]+ 即可完整匹配。
  */
 export function vaultUrlsToRelative(markdown: string, noteDir: string): string {
-  return markdown.replace(/vault:\/\/localhost\/[^\s)"']+/g, (url) => {
+  const inSrc = (url: string): string => {
+    if (!url.startsWith(VAULT_PREFIX)) return url;
     const rel = fromVaultUrl(url);
     return rel ? relativeFrom(noteDir, rel) : url;
-  });
+  };
+  return markdown
+    .replace(/(!\[[^\]]*\])\(([^()\s]+)\)/g, (_m, pre: string, url: string) => `${pre}(${inSrc(url)})`)
+    .replace(/(?<!!)(\[[^\]]*\])\(([^()\s]+)\)/g, (_m, pre: string, url: string) => `${pre}(${inSrc(url)})`);
 }
 
 /** 简单前缀剥离（测试/调试用；产品保存路径请用 vaultUrlsToRelative） */
