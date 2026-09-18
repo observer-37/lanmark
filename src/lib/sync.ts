@@ -1,0 +1,65 @@
+import { invoke } from "@tauri-apps/api/core";
+
+/** 与 sync.rs / sync_client.rs 的 serde camelCase 类型对应 */
+
+export interface FileMeta {
+  path: string;
+  kind: "note" | "asset";
+  hash: string;
+  mtimeMs: number;
+  size: number;
+}
+
+export interface Discovered {
+  name: string;
+  url: string;
+}
+
+export interface ServerProfile {
+  id: string;
+  name: string;
+  url: string;
+  token: string;
+}
+
+export interface SyncPairingInfo {
+  running: boolean;
+  port: number | null;
+  deviceName: string;
+  pairingCode: string;
+}
+
+export interface SyncReport {
+  pulled: string[];
+  pushed: string[];
+  conflicts: string[];
+  skipped: number;
+  errors: string[];
+}
+
+/** 手机端：同步服务器配对信息（服务器随 vault 打开自动启动） */
+export const sync = {
+  pairingInfo: () => invoke<SyncPairingInfo>("sync_pairing_info"),
+  serverStart: () => invoke<number>("sync_server_start"),
+
+  /** 桌面端 */
+  discover: () => invoke<Discovered[]>("sync_discover"),
+  pair: (url: string, code: string) =>
+    invoke<ServerProfile>("sync_pair", { url, code }),
+  servers: () => invoke<ServerProfile[]>("sync_servers"),
+  serverRemove: (id: string) => invoke<void>("sync_server_remove", { id }),
+  syncNow: (id: string) => invoke<SyncReport>("sync_now", { id }),
+};
+
+/** Android 专项：vault 目录选择 + 全部文件访问授权（mobile.rs 插件） */
+export const vaultPicker = {
+  hasAllFilesAccess: () => invoke<boolean>("vault_picker_has_all_files_access"),
+  requestAllFilesAccess: () =>
+    invoke<void>("vault_picker_request_all_files_access"),
+  pickFolder: () => invoke<string | null>("vault_picker_pick_folder"),
+};
+
+/** 平台判断：Android WebView UA 必含 Android；桌面端（Win/Linux/macOS）不含 */
+export function isAndroid(): boolean {
+  return navigator.userAgent.includes("Android");
+}

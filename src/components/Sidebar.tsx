@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { FileText, FolderPlus, History, Plus, RefreshCw, Search, Star } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import { TreeView } from "./TreeView";
+import { SyncSection } from "./SyncSection";
 import type { PathTitle } from "../lib/vault";
 
 function SectionLabel({ children }: { children: string }) {
@@ -163,6 +164,11 @@ export function Sidebar() {
             <TreeView tree={tree} />
           </>
         )}
+      </div>
+
+      {/* M2 同步：手机=同步中心状态/配对码，桌面=服务器列表/立即同步 */}
+      <div className="border-t border-line px-2 pb-3 pt-1">
+        <SyncSection />
       </div>
 
       {activePath && (

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { vault, remapPath, type VaultNode, type SearchHit, type PathTitle } from "../lib/vault";
+import { vaultPicker } from "../lib/sync";
 
 const SAVE_DEBOUNCE_MS = 700;
 const RECENTS_SHOWN = 8;
@@ -23,6 +24,10 @@ interface VaultStore {
 
   init: () => Promise<void>;
   pickVault: (mode: "open" | "create") => Promise<void>;
+  /** Android：SAF 选择器已给出真实路径，直接开库 */
+  pickAndroidFolder: (mode: "open" | "create") => Promise<void>;
+  /** Android：回退到应用私有目录（M1 行为，无需授权） */
+  pickAppDir: (mode: "open" | "create") => Promise<void>;
   refreshTree: () => Promise<void>;
   refreshMeta: () => Promise<void>;
   reindex: () => Promise<void>;
@@ -91,6 +96,32 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     try {
       const path = await vault.pickAndSet(mode);
       set({ status: "ready", vaultPath: path, activePath: null, content: "", dirty: false });
+      await get().refreshTree();
+      await get().refreshMeta();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  pickAndroidFolder: async (mode) => {
+    try {
+      const path = await vaultPicker.pickFolder();
+      if (!path) return; // 用户取消
+      const ready = await vault.setPath(path, mode);
+      set({ status: "ready", vaultPath: ready, activePath: null, content: "", dirty: false });
+      await get().refreshTree();
+      await get().refreshMeta();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  pickAppDir: async (mode) => {
+    try {
+      const { documentDir } = await import("@tauri-apps/api/path");
+      const path = await documentDir();
+      const ready = await vault.setPath(path, mode);
+      set({ status: "ready", vaultPath: ready, activePath: null, content: "", dirty: false });
       await get().refreshTree();
       await get().refreshMeta();
     } catch (e) {

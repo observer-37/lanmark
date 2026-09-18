@@ -54,6 +54,9 @@ export const vault = {
     return invoke<string>("vault_set_path", { path, mode });
   },
   openPath: (path: string) => invoke<string>("vault_open_path", { path }),
+  /** Android SAF 流程：路径由插件选择器给出，直接走 vault_set_path（含 create/open 校验） */
+  setPath: (path: string, mode: "open" | "create") =>
+    invoke<string>("vault_set_path", { path, mode }),
   reindex: () => invoke<number>("reindex_vault"),
   tree: () => invoke<VaultNode[]>("tree_list"),
   createNote: (dir: string, name: string) =>

@@ -26,6 +26,11 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.11.0"
 tauri-plugin-dialog = "2.7.3"
 base64 = "0.23.1"
+# M2 同步：手机端 axum 服务器 + 桌面端 HTTP 客户端 + mDNS 发现
+axum = "0.8"
+tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+mdns-sd = "0.21"
 tauri-plugin-log = "2.9.1"
 log = "0.4.34"
 

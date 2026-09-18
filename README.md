@@ -46,6 +46,9 @@ pnpm test
 
 # Rust 侧检查与测试
 cd src-tauri && cargo check && cargo test
+
+# Android 交叉编译门禁（不跑完整 gradle，快速验证 Rust 侧编过）
+scripts/android-check.sh
 ```
 
 ## 构建

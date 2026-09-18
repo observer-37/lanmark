@@ -2,8 +2,12 @@ mod bridge;
 mod commands;
 mod db;
 mod fs_ops;
+mod mobile;
 mod protocol;
 mod sanitize;
+mod sync;
+mod sync_client;
+mod sync_server;
 mod vault;
 
 use std::path::PathBuf;
@@ -26,7 +30,7 @@ fn ping(app: tauri::AppHandle, message: String) -> Result<bridge::EchoPayload, S
 pub fn run() {
     let state = Arc::new(vault::AppState::default());
     let protocol_state = Arc::clone(&state);
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         // vault:// 协议：笔记内相对路径（图片等）→ vault 内真实文件
         .register_asynchronous_uri_scheme_protocol("vault", move |_ctx, request, responder| {
             let state = Arc::clone(&protocol_state);
@@ -41,6 +45,8 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // M2 移动端小插件：vault 目录选择（SAF + 全部文件访问授权），见 src/mobile.rs
+        .plugin(mobile::init())
         // 日志：stdout（无头 E2E / 终端可见 WebView console）+ 日志文件
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -89,7 +95,37 @@ pub fn run() {
             commands::favorites_list,
             commands::favorite_toggle,
             commands::asset_save,
+            sync_server::sync_pairing_info,
+            sync_server::sync_server_start,
+            sync_client::sync_discover,
+            sync_client::sync_pair,
+            sync_client::sync_servers,
+            sync_client::sync_server_remove,
+            sync_client::sync_now,
+            mobile::vault_picker_has_all_files_access,
+            mobile::vault_picker_request_all_files_access,
+            mobile::vault_picker_pick_folder,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    // Android：上滑划掉 Activity 会触发 tao 的 process::exit(0) 连前台服务一起杀
+    // （tauri#15671）——必须 prevent_exit 保住同步服务器进程；
+    // 划掉后重开白屏（wry 无法给新 Activity 建 webview）→ Resumed 时 webview 空则重建。
+    #[cfg(target_os = "android")]
+    app.run(|app, event| match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            api.prevent_exit();
+        }
+        tauri::RunEvent::Resumed { .. } => {
+            if app.webview_windows().is_empty() {
+                use tauri::WebviewUrl;
+                let _ = tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+                    .build();
+            }
+        }
+        _ => {}
+    });
+    #[cfg(not(target_os = "android"))]
+    app.run(|_app, _event| {});
 }

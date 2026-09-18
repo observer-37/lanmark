@@ -15,13 +15,13 @@ use crate::vault::{self, AppState, AppConfig};
 
 pub type CmdResult<T> = Result<T, String>;
 
-fn with_db<T>(state: &Arc<AppState>, f: impl FnOnce(&Connection) -> CmdResult<T>) -> CmdResult<T> {
+pub(crate) fn with_db<T>(state: &Arc<AppState>, f: impl FnOnce(&Connection) -> CmdResult<T>) -> CmdResult<T> {
     let guard = state.db.lock().map_err(|_| "DB 锁中毒")?;
     let conn = guard.as_ref().ok_or("尚未打开 vault")?;
     f(conn)
 }
 
-fn with_vault<T>(state: &Arc<AppState>, f: impl FnOnce(&PathBuf) -> CmdResult<T>) -> CmdResult<T> {
+pub(crate) fn with_vault<T>(state: &Arc<AppState>, f: impl FnOnce(&PathBuf) -> CmdResult<T>) -> CmdResult<T> {
     let guard = state.vault.lock().map_err(|_| "vault 锁中毒")?;
     let vault = guard.as_ref().ok_or("尚未打开 vault")?;
     f(vault)
@@ -114,6 +114,17 @@ pub fn open_vault_at(state: &Arc<AppState>, path: &Path) -> CmdResult<()> {
         fs_ops::reindex(path, &conn).map_err(|e| format!("重索引失败: {e}"))?;
         *vg = Some(path.to_path_buf());
         *dg = Some(conn);
+    }
+    // M2：Android = 局域网同步中心节点，vault 打开即启动 axum 服务器（幂等；
+    // 前台服务由 Kotlin 侧保活，见 gen/android SyncService）。桌面默认不做服务器。
+    #[cfg(target_os = "android")]
+    {
+        let st = Arc::clone(state);
+        std::thread::spawn(move || {
+            if let Err(e) = crate::sync_server::spawn(st) {
+                eprintln!("同步服务器启动失败: {e}");
+            }
+        });
     }
     Ok(())
 }

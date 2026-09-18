@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 pub struct AppState {
     pub vault: Mutex<Option<PathBuf>>,
     pub db: Mutex<Option<Connection>>,
+    /// M2 同步服务器实际监听端口（None = 未启动）；幂等启动的判据
+    pub sync_port: Mutex<Option<u16>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
