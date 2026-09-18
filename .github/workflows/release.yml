@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
 
+# 仓库默认 GITHUB_TOKEN 为只读；上传 release 资产需要 contents:write
+# （只读默认下允许按 workflow 提权，最小授权）
+permissions:
+  contents: write
+
 # 构建失败不应留下半成品 release：release 正文先由 gh release create 建好，
 # 产物上传失败时 release 页仍只有说明，不误导下载。
 jobs:
