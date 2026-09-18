@@ -68,9 +68,15 @@ pub fn run() {
                 if let Some(p) = cfg.vault_path.filter(|p| !p.is_empty()) {
                     let path = PathBuf::from(p);
                     if path.is_dir() {
-                        if let Err(e) = commands::open_vault_at(&state, &path) {
-                            eprintln!("自动打开 vault 失败: {e}");
-                        }
+                        // open_vault_at 含全量 reindex：直接跑在 async worker 上
+                        // 会阻塞该 worker，拖慢同 runtime 的 IPC 命令
+                        tauri::async_runtime::spawn_blocking(move || {
+                            if let Err(e) = commands::open_vault_at(&state, &path) {
+                                eprintln!("自动打开 vault 失败: {e}");
+                            }
+                        })
+                        .await
+                        .ok();
                     }
                 }
             });

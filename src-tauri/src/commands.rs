@@ -50,9 +50,9 @@ pub fn vault_status(app: tauri::AppHandle, state: State<Arc<AppState>>) -> CmdRe
 /// 文件夹选择由前端完成（JS dialog 桌面跨平台；移动端 M1 用 app 文档目录，M2 改 SAF 选择器），
 /// 本命令只接收路径——Rust 侧不依赖任何 cfg(desktop) 的对话框 API。
 #[tauri::command]
-pub fn vault_set_path(
+pub async fn vault_set_path(
     app: tauri::AppHandle,
-    state: State<Arc<AppState>>,
+    state: State<'_, Arc<AppState>>,
     path: String,
     mode: String,
 ) -> CmdResult<String> {
@@ -60,10 +60,17 @@ pub fn vault_set_path(
     if !p.is_dir() {
         return Err(format!("目录不存在: {path}"));
     }
-    pick_and_set_op(&state, &p, &mode)?;
-    let cfg = AppConfig { vault_path: Some(path.clone()) };
-    vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
-    Ok(path)
+    // 开库含全量 reindex（大库可达数秒）：同步命令跑在 Tauri 主线程会冻 UI，
+    // Android 上有 ANR 风险 → 阻塞主体挪出主线程
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<String> {
+        pick_and_set_op(&state, &p, &mode)?;
+        let cfg = AppConfig { vault_path: Some(path.clone()) };
+        vault::save_config(&app, &cfg).map_err(|e| format!("保存配置失败: {e}"))?;
+        Ok(path)
+    })
+    .await
+    .map_err(|e| format!("开库任务失败: {e}"))?
 }
 
 /// 纯逻辑：校验目录 → 开库（对话框与配置持久化由上层负责）
@@ -101,8 +108,12 @@ pub fn vault_ensure_dir(path: String) -> CmdResult<String> {
 
 /// 直接按路径打开 vault（设置页 / 测试用）
 #[tauri::command]
-pub fn vault_open_path(state: State<Arc<AppState>>, path: String) -> CmdResult<String> {
-    vault_open_path_op(&state, path)
+pub async fn vault_open_path(state: State<'_, Arc<AppState>>, path: String) -> CmdResult<String> {
+    let state = state.inner().clone();
+    // reindex 重活挪出主线程（同 vault_set_path）
+    tauri::async_runtime::spawn_blocking(move || vault_open_path_op(&state, path))
+        .await
+        .map_err(|e| format!("开库任务失败: {e}"))?
 }
 
 pub fn vault_open_path_op(state: &Arc<AppState>, path: String) -> CmdResult<String> {
@@ -255,13 +266,21 @@ pub fn asset_save_op(state: &Arc<AppState>, data_base64: &str, ext: &str) -> Cmd
 // ---------- IPC 封装（3 行一层） ----------
 
 #[tauri::command]
-pub fn reindex_vault(state: State<Arc<AppState>>) -> CmdResult<usize> {
-    reindex_vault_op(state.inner())
+pub async fn reindex_vault(state: State<'_, Arc<AppState>>) -> CmdResult<usize> {
+    let state = state.inner().clone();
+    // 全量 reindex 挪出主线程（同 vault_set_path）
+    tauri::async_runtime::spawn_blocking(move || reindex_vault_op(&state))
+        .await
+        .map_err(|e| format!("重索引任务失败: {e}"))?
 }
 
 #[tauri::command]
-pub fn tree_list(state: State<Arc<AppState>>) -> CmdResult<Vec<Node>> {
-    tree_list_op(state.inner())
+pub async fn tree_list(state: State<'_, Arc<AppState>>) -> CmdResult<Vec<Node>> {
+    let state = state.inner().clone();
+    // 全 vault 目录遍历挪出主线程（大库下冻 UI 同类风险）
+    tauri::async_runtime::spawn_blocking(move || tree_list_op(&state))
+        .await
+        .map_err(|e| format!("目录树任务失败: {e}"))?
 }
 
 #[tauri::command]

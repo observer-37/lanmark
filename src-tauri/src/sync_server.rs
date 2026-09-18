@@ -28,7 +28,9 @@ use crate::vault::AppState;
 
 pub const SERVICE_TYPE: &str = "_lanmark._tcp.local.";
 pub const DEFAULT_PORT: u16 = 4180;
-const MAX_PORT_TRIES: u16 = 10;
+/// 生产单实例下 10 个足够；测试并行各起常驻服务器（无停机机制），
+/// 范围太窄会 AddrInUse（4180..4190 全占的回归已踩过）
+const MAX_PORT_TRIES: u16 = 20;
 
 /// vault 内同步元数据（.lanmark/sync.json）：设备名 + 配对码 + 已发 token
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -110,11 +112,11 @@ pub struct ServerCtx {
     pub app: Arc<AppState>,
     pub cfg: Mutex<SyncConfig>,
     /// /pair 爆破保护：连续失败计数 + 锁定截止时间
-    pub pair_guard: Mutex<PairGuard>,
+    pair_guard: Mutex<PairGuard>,
 }
 
 #[derive(Default)]
-struct PairGuard {
+pub(crate) struct PairGuard {
     failures: u32,
     locked_until: Option<std::time::Instant>,
 }
@@ -137,6 +139,14 @@ impl ServerCtx {
             .ok_or_else(|| "尚未打开 vault".to_string())
     }
 
+    /// 从**当前** vault 实时加载 sync 配置（磁盘为真相；切换 vault 后
+    /// 配对码/token 立即跟随新库，而不是停留在首次 spawn 时的旧库）
+    fn current_config(&self) -> Result<(PathBuf, SyncConfig), (StatusCode, String)> {
+        let vault = self.vault().map_err(|e| (StatusCode::CONFLICT, e))?;
+        let cfg = load_sync_config(&vault);
+        Ok((vault, cfg))
+    }
+
     fn check_token(&self, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
         let auth = headers
             .get("authorization")
@@ -146,19 +156,54 @@ impl ServerCtx {
         if token.is_empty() {
             return Err((StatusCode::UNAUTHORIZED, "缺少 token（先 /api/v1/pair）".into()));
         }
-        let ok = self
-            .cfg
-            .lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?
-            .tokens
-            .iter()
-            .any(|t| const_eq(t, token));
+        // cfg 锁兼作 /pair 写配置的串行化锁；配置本体从当前 vault 实时读
+        let cfg = {
+            let _serial = self
+                .cfg
+                .lock()
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
+            self.current_config()?.1
+        };
+        let ok = cfg.tokens.iter().any(|t| const_eq(t, token));
         if ok {
             Ok(())
         } else {
-            Err((StatusCode::FORBIDDEN, "token 无效（服务器可能重启过，重新配对）".into()))
+            Err((StatusCode::FORBIDDEN, "token 无效（服务器可能重启过或已切换笔记库，重新配对）".into()))
         }
     }
+}
+
+/// 轻量统计（/info 用）：设备名读当前 vault 的 sync.json，笔记数走 DB 计数、
+/// 附件数浅层计数——不逐文件 sha256（那是 local_manifest 的重活；/info 无鉴权，
+/// 单线程 runtime 上被刷请求会停摆整个服务器）
+fn light_stats(app: &Arc<AppState>) -> (String, u64, u64) {
+    let vault = match app.vault.lock().ok().and_then(|g| g.clone()) {
+        Some(v) => v,
+        None => return (String::new(), 0, 0),
+    };
+    let cfg = load_sync_config(&vault);
+    let mut notes = 0i64;
+    if let Ok(guard) = app.db.lock() {
+        if let Some(c) = guard.as_ref() {
+            notes = c
+                .query_row("SELECT COUNT(*) FROM files WHERE is_note=1", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap_or(0);
+        }
+    }
+    let assets = std::fs::read_dir(vault.join(fs_ops::ASSETS_DIR))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_type()
+                        .map(|ft| ft.is_file() && !ft.is_symlink())
+                        .unwrap_or(false)
+                })
+                .count() as u64
+        })
+        .unwrap_or(0);
+    (cfg.device_name, notes as u64, assets)
 }
 
 /// 常量时间字符串比较（token 校验，避免时序侧信道）
@@ -174,17 +219,13 @@ fn const_eq(a: &str, b: &str) -> bool {
 
 /// GET /api/v1/info —— 无需鉴权：设备名 + vault 统计（不含任何笔记数据）
 async fn info(State(ctx): State<Arc<ServerCtx>>) -> impl IntoResponse {
-    let stats = local_manifest(&ctx.app).map(|m| {
-        (
-            m.iter().filter(|f| f.kind == "note").count(),
-            m.iter().filter(|f| f.kind == "asset").count(),
-        )
-    });
-    let (notes, assets) = stats.unwrap_or((0, 0));
-    let cfg = ctx.cfg.lock().map(|c| c.clone()).unwrap_or_default();
+    let app = ctx.app.clone();
+    let (name, notes, assets) = tokio::task::spawn_blocking(move || light_stats(&app))
+        .await
+        .unwrap_or((String::new(), 0, 0));
     Json(json!({
         "app": "lanmark",
-        "name": cfg.device_name,
+        "name": name,
         "notes": notes,
         "assets": assets,
         "requiresPairing": true,
@@ -218,8 +259,12 @@ async fn pair(
         }
     }
 
-    let mut cfg = ctx.cfg.lock().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
+    // cfg 锁串行化「读码→追加 token→落盘」，防并发配对丢失更新；
+    // 配置本体从当前 vault 实时读（切库后旧库的码/token 不再有效）
+    let serial = ctx.cfg.lock().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
+    let (vault, mut cfg) = ctx.current_config()?;
     if body.code.trim() != cfg.pairing_code {
+        drop(serial);
         let mut guard = ctx.pair_guard.lock().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
         guard.failures += 1;
         if guard.failures >= PAIR_MAX_FAILURES {
@@ -237,8 +282,9 @@ async fn pair(
     }
     let token = gen_token(&cfg.pairing_code);
     cfg.tokens.push(token.clone());
-    let vault = ctx.vault().map_err(|e| (StatusCode::CONFLICT, e))?;
-    save_sync_config(&vault, &cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("保存配置失败: {e}")))?;
+    let res = save_sync_config(&vault, &cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("保存配置失败: {e}")));
+    drop(serial);
+    res?;
     Ok(Json(json!({ "token": token, "name": cfg.device_name })))
 }
 
@@ -248,7 +294,12 @@ async fn manifest(
     headers: HeaderMap,
 ) -> Result<Json<Vec<FileMeta>>, (StatusCode, String)> {
     ctx.check_token(&headers)?;
-    let list = local_manifest(&ctx.app).map_err(|e| (StatusCode::CONFLICT, e))?;
+    // 重活（读全库 + 逐文件 sha256）移出单线程 runtime，防服务器停摆
+    let app = ctx.app.clone();
+    let list = tokio::task::spawn_blocking(move || local_manifest(&app))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(Json(list))
 }
 
@@ -259,6 +310,20 @@ async fn pull(
     Json(req): Json<PullRequest>,
 ) -> Result<Json<PullResponse>, (StatusCode, String)> {
     ctx.check_token(&headers)?;
+    // 重活（manifest + 读文件 + 编码）移出单线程 runtime，防服务器停摆
+    let ctx2 = ctx.clone();
+    let (files, missing) = tokio::task::spawn_blocking(move || pull_blocking(&ctx2, &req.paths))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
+        .map_err(|(s, m)| (s, m))?;
+    Ok(Json(PullResponse { files, missing }))
+}
+
+/// pull 阻塞主体（spawn_blocking 内执行）
+fn pull_blocking(
+    ctx: &Arc<ServerCtx>,
+    paths: &[String],
+) -> Result<(Vec<PullFile>, Vec<(String, String)>), (StatusCode, String)> {
     let vault = ctx.vault().map_err(|e| (StatusCode::CONFLICT, e))?;
     let current = local_manifest(&ctx.app).map_err(|e| (StatusCode::CONFLICT, e))?;
     let by_path: HashMap<String, FileMeta> =
@@ -266,7 +331,7 @@ async fn pull(
 
     let mut files = Vec::new();
     let mut missing = Vec::new();
-    for path in &req.paths {
+    for path in paths {
         let Some(meta) = by_path.get(path) else {
             missing.push((path.clone(), "不在服务器清单中".into()));
             continue;
@@ -290,7 +355,7 @@ async fn pull(
             Err(e) => missing.push((path.clone(), format!("读取失败: {e}"))),
         }
     }
-    Ok(Json(PullResponse { files, missing }))
+    Ok((files, missing))
 }
 
 #[derive(Deserialize)]
@@ -307,11 +372,25 @@ async fn push(
     Json(body): Json<PushBody>,
 ) -> Result<Json<Vec<PushResult>>, (StatusCode, String)> {
     ctx.check_token(&headers)?;
+    // 逐文件落盘（含 DB 写）移出单线程 runtime
+    let ctx2 = ctx.clone();
+    let results = tokio::task::spawn_blocking(move || push_blocking(&ctx2, &body.files))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?
+        .map_err(|(s, m)| (s, m))?;
+    Ok(Json(results))
+}
+
+/// push 阻塞主体（spawn_blocking 内执行）
+fn push_blocking(
+    ctx: &Arc<ServerCtx>,
+    files: &[PushFile],
+) -> Result<Vec<PushResult>, (StatusCode, String)> {
     let vault = ctx.vault().map_err(|e| (StatusCode::CONFLICT, e))?;
     let mut results = Vec::new();
 
-    for pf in &body.files {
-        let result = write_pushed_file(&ctx, &vault, pf);
+    for pf in files {
+        let result = write_pushed_file(ctx, &vault, pf);
         match result {
             Ok(conflict_saved_as) => results.push(PushResult {
                 path: pf.path.clone(),
@@ -327,7 +406,7 @@ async fn push(
             }),
         }
     }
-    Ok(Json(results))
+    Ok(results)
 }
 
 /// 单文件落盘逻辑（阻塞，从 handler 分离便于测试）
@@ -431,8 +510,19 @@ async fn delete_files(
     Json(body): Json<DeleteBody>,
 ) -> Result<Json<Vec<PushResult>>, (StatusCode, String)> {
     ctx.check_token(&headers)?;
+    let app = ctx.app.clone();
+    // 软删是 fs + DB 阻塞操作，移出单线程 runtime
+    let results =
+        tokio::task::spawn_blocking(move || delete_blocking(&app, &body.paths))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("同步任务异常: {e}")))?;
+    Ok(Json(results))
+}
+
+/// delete 阻塞主体（spawn_blocking 内执行）
+fn delete_blocking(app: &Arc<AppState>, paths: &[String]) -> Vec<PushResult> {
     let mut results = Vec::new();
-    for path in &body.paths {
+    for path in paths {
         // 点目录禁止删除：.lanmark/lanmark.db（索引事实）与 sync.json（全体凭据）
         // 被删 = 同步体系自我 DoS
         if has_dot_segment(path) {
@@ -444,7 +534,7 @@ async fn delete_files(
             });
             continue;
         }
-        match commands::entry_delete_op(&ctx.app, path) {
+        match commands::entry_delete_op(app, path) {
             Ok(trash) => results.push(PushResult {
                 path: path.clone(),
                 ok: true,
@@ -459,7 +549,7 @@ async fn delete_files(
             }),
         }
     }
-    Ok(Json(results))
+    results
 }
 
 pub fn router(ctx: Arc<ServerCtx>) -> Router {
@@ -514,6 +604,9 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
         .clone()
         .ok_or("尚未打开 vault")?;
     let cfg = load_sync_config(&vault);
+    // 保留一份 app 引用给线程退出路径复位 sync_port（否则服务器死后
+    // UI 仍报 running，且 spawn 幂等早退无法自愈）
+    let app_for_cleanup = Arc::clone(&app);
     let ctx = Arc::new(ServerCtx::new(app, cfg));
 
     // mDNS 广播（best effort；Android 需 multicast lock，失败不阻断服务器）
@@ -533,17 +626,32 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
                 Ok(rt) => rt,
                 Err(e) => {
                     eprintln!("同步服务器 runtime 启动失败: {e}");
+                    reset_sync_port(&app_for_cleanup);
                     return;
                 }
             };
-            rt.block_on(async move {
-                if let Err(e) = serve_on(listener, ctx).await {
-                    eprintln!("同步服务器退出: {e}");
+            let serve_failed = rt.block_on(async move {
+                match serve_on(listener, ctx).await {
+                    Ok(_) => false,
+                    Err(e) => {
+                        eprintln!("同步服务器退出: {e}");
+                        true
+                    }
                 }
             });
+            if serve_failed {
+                reset_sync_port(&app_for_cleanup);
+            }
         })
         .map_err(|e| format!("启动同步服务器线程失败: {e}"))?;
     Ok(port)
+}
+
+/// 服务器线程退出后把 sync_port 置回 None（自愈：下次 sync_server_start 可重新绑定）
+fn reset_sync_port(app: &Arc<AppState>) {
+    if let Ok(mut p) = app.sync_port.lock() {
+        *p = None;
+    }
 }
 
 /// std listener → tokio listener → axum serve（spawn 与测试共用）
@@ -677,6 +785,58 @@ mod tests {
     /// 回归：/pair 爆破保护——连续失败 PAIR_MAX_FAILURES 次后锁定，
     /// 期间连正确码也拒绝（429）。8 位数字码仅 10^8 组合，
     /// LAN 内脚本数小时可穷尽，无退避 = 同步体系裸奔
+    /// 回归：切换 vault 后配对配置必须实时跟随当前库（此前 ServerCtx.cfg
+    /// 停在首次 spawn 的旧库：UI 显示新库的码、服务器校验旧 token，永远 403）
+    #[test]
+    fn vault_switch_updates_pairing_live() {
+        use crate::commands::open_vault_at;
+        let dir_a = tempfile::TempDir::new().unwrap();
+        let dir_b = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir_a.path()).unwrap();
+        let (base, code_a) = test_util::start_phone_server(dir_a.path(), Arc::clone(&app));
+        let client = reqwest::blocking::Client::new();
+        wait_ready(&client, &base);
+
+        let paired: serde_json::Value = client
+            .post(format!("{base}/api/v1/pair"))
+            .json(&json!({ "code": code_a }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        let token_a = paired["token"].as_str().unwrap().to_string();
+
+        // 切库（服务器不重启，随 ctx.app 跟随）
+        open_vault_at(&app, dir_b.path()).unwrap();
+        let code_b = load_sync_config(dir_b.path()).pairing_code;
+        assert_ne!(code_a, code_b, "两库配对码应独立");
+
+        // 旧库 token 对新库无效
+        let r = client
+            .get(format!("{base}/api/v1/manifest"))
+            .header("authorization", format!("Bearer {token_a}"))
+            .send()
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "旧库 token 应被拒");
+
+        // 新库码（UI 从当前库读）配对成功且可用
+        let paired_b: serde_json::Value = client
+            .post(format!("{base}/api/v1/pair"))
+            .json(&json!({ "code": code_b }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        let token_b = paired_b["token"].as_str().unwrap().to_string();
+        let r = client
+            .get(format!("{base}/api/v1/manifest"))
+            .header("authorization", format!("Bearer {token_b}"))
+            .send()
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "新库 token 应可用");
+    }
+
     #[test]
     fn const_eq_semantics() {
         assert!(const_eq("abc", "abc"));

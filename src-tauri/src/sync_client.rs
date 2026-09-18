@@ -525,13 +525,29 @@ pub fn sync_server_remove(app: tauri::AppHandle, id: String) -> CmdResult<()> {
     save_servers(&app, &servers)
 }
 
-/// 立即同步（阻塞回合放进 blocking 线程）
+/// 立即同步（阻塞回合放进 blocking 线程）。
+/// Rust 侧全局互斥兜底：UI 锁（syncing 标志）之外的双发（快速双击/多窗口）
+/// 会让两个回合并发 reindex/写基线文件互踩
+static SYNC_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct SyncGuard;
+impl Drop for SyncGuard {
+    fn drop(&mut self) {
+        SYNC_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
 pub async fn sync_now(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
     id: String,
 ) -> CmdResult<SyncReport> {
+    use std::sync::atomic::Ordering;
+    if SYNC_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Err("同步回合进行中，请稍候".into());
+    }
+    let _guard = SyncGuard;
     let servers = load_servers(&app);
     let profile = servers
         .into_iter()
