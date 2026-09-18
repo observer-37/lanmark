@@ -129,7 +129,11 @@ pub fn open_vault_at(state: &Arc<AppState>, path: &Path) -> CmdResult<()> {
     fs_ops::ensure_layout(path).map_err(|e| format!("初始化 vault 失败: {e}"))?;
     let db_path = path.join(fs_ops::META_DIR).join("lanmark.db");
     let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {e}"))?;
-    conn.pragma_update(None, "journal_mode", "WAL").ok();
+    // WAL 在部分共享存储（Android 外部存储）上不可用：回退必须留痕，
+    // 否则「搜索偶发锁库」一类问题无从排查
+    if let Err(e) = conn.pragma_update(None, "journal_mode", "WAL") {
+        log::warn!("WAL 模式启用失败（回退默认 journal）: {e}");
+    }
     db::init_db(&conn).map_err(|e| format!("初始化数据库失败: {e}"))?;
     {
         let mut vg = state.vault.lock().map_err(|_| "锁中毒")?;

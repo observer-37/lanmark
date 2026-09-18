@@ -66,10 +66,11 @@ pub fn save_sync_config(vault: &std::path::Path, cfg: &SyncConfig) -> std::io::R
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    // tmp+rename 原子写，与笔记落盘同纪律
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?)?;
-    std::fs::rename(&tmp, &path)?;
+    // tmp+rename 原子写（tmp 名含 pid+序号，与笔记落盘同纪律）
+    fs_ops::atomic_write(
+        &path,
+        serde_json::to_string_pretty(cfg).map_err(std::io::Error::other)?.as_bytes(),
+    )?;
     Ok(())
 }
 

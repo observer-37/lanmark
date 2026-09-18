@@ -11,6 +11,9 @@ const m = vi.hoisted(() => ({
   recents: vi.fn(),
   favorites: vi.fn(),
   tree: vi.fn(),
+  search: vi.fn(),
+  rename: vi.fn(),
+  move: vi.fn(),
 }));
 
 vi.mock("../lib/vault", () => ({
@@ -27,11 +30,11 @@ vi.mock("../lib/vault", () => ({
     setPathWithCreate: vi.fn(),
     createNote: vi.fn(),
     createFolder: vi.fn(),
-    rename: vi.fn(),
+    rename: m.rename,
     remove: vi.fn(),
-    move: vi.fn(),
+    move: m.move,
     toggleFavorite: vi.fn(),
-    search: vi.fn(),
+    search: m.search,
   },
   remapPath: (active: string | null, from: string, to: string): string | null =>
     active === from
@@ -44,7 +47,7 @@ vi.mock("../lib/sync", () => ({ vaultPicker: { pickFolder: vi.fn() } }));
 
 import { useVaultStore } from "./vault";
 
-const { readNote, writeNote, recents, favorites, tree } = m;
+const { readNote, writeNote, recents, favorites, tree, search, rename, move } = m;
 
 function baseState() {
   useVaultStore.setState({
@@ -135,5 +138,64 @@ describe("openNote/closeNote 守卫", () => {
     const s = useVaultStore.getState();
     expect(s.activePath).toBe("b.md");
     expect(s.content).toBe("B内容");
+  });
+});
+
+describe("review P3 回归：防抖/搜索序号/元数据刷新", () => {
+  it("防抖为尾沿：连续输入在停止输入后才落盘一次", async () => {
+    vi.useFakeTimers();
+    try {
+      useVaultStore.setState({ activePath: "a.md", content: "", dirty: false });
+      const s = useVaultStore.getState();
+      s.setContent("a");
+      await vi.advanceTimersByTimeAsync(100);
+      s.setContent("ab");
+      // t=700：旧「首击锚定」实现在此已落盘（句中半成品）
+      await vi.advanceTimersByTimeAsync(600);
+      expect(writeNote).not.toHaveBeenCalled();
+      // t=800 = 最后一次输入(100) + 700
+      await vi.advanceTimersByTimeAsync(100);
+      expect(writeNote).toHaveBeenCalledTimes(1);
+      expect(writeNote).toHaveBeenCalledWith("a.md", "ab");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("搜索序号守卫：慢的旧响应不得覆盖新结果", async () => {
+    let resolveOld: (v: unknown) => void = () => {};
+    search.mockImplementation((q: string) =>
+      q === "old"
+        ? new Promise((r) => {
+            resolveOld = r;
+          })
+        : Promise.resolve([{ path: "new.md", title: "新", snippet: "" }]),
+    );
+    const p1 = useVaultStore.getState().doSearch("old");
+    const p2 = useVaultStore.getState().doSearch("new");
+    await p2;
+    expect(useVaultStore.getState().searchResults[0].path).toBe("new.md");
+
+    resolveOld([{ path: "old.md", title: "旧", snippet: "" }]);
+    await p1;
+    expect(useVaultStore.getState().searchResults[0].path).toBe("new.md");
+  });
+
+  it("rename 后刷新 recents/favorites（DB 路径已改，前端 meta 必须跟）", async () => {
+    useVaultStore.setState({
+      tree: [{ path: "a.md", kind: "note", name: "a.md", title: null }],
+    });
+    rename.mockResolvedValueOnce("b.md");
+    await useVaultStore.getState().commitRename("a.md", "b");
+    expect(rename).toHaveBeenCalledWith("a.md", "b");
+    expect(recents).toHaveBeenCalled();
+    expect(favorites).toHaveBeenCalled();
+  });
+
+  it("move 后刷新 recents/favorites", async () => {
+    move.mockResolvedValueOnce("d/a.md");
+    await useVaultStore.getState().moveNode("a.md", "d");
+    expect(recents).toHaveBeenCalled();
+    expect(favorites).toHaveBeenCalled();
   });
 });

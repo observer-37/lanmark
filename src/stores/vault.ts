@@ -54,6 +54,8 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 // openNote 单调序号：快速连开/开+关并发时，慢的旧响应不得覆盖新状态
 // （错位后用户编辑会把 A 的内容存进 B 的文件）
 let openSeq = 0;
+// 搜索请求序号：连续搜索时慢的旧响应不得覆盖新结果
+let searchSeq = 0;
 
 export const useVaultStore = create<VaultStore>((set, get) => ({
   status: "loading",
@@ -221,10 +223,11 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   setContent: (content) => {
-    const { dirty } = get();
     if (content === get().content) return;
     set({ content, dirty: true });
-    if (!dirty) void get().scheduleSave();
+    // 尾沿防抖：每次输入都重排（此前只在首击锚定，连续输入约每 700ms
+    // 落盘一次句中半成品——同步恰在打字中触发会把半成品推给手机端）
+    void get().scheduleSave();
   },
 
   scheduleSave: () => {
@@ -307,6 +310,9 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       } else {
         await get().refreshTree();
       }
+      // DB 里 recents/favorites 的路径已被 rename_paths 更新，前端必须重读，
+      // 否则侧栏仍显示旧路径（点击报「笔记不存在」直到下次开笔记才自愈）
+      await get().refreshMeta();
     } catch (e) {
       set({ error: String(e) });
     }
@@ -342,6 +348,8 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
       const newPath = await vault.move(path, newDir);
       set((s) => ({ activePath: remapPath(s.activePath, path, newPath) }));
       await get().refreshTree();
+      // 同 commitRename：recents/favorites 路径已变，需重读
+      await get().refreshMeta();
     } catch (e) {
       set({ error: String(e) });
     }
@@ -357,6 +365,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
   },
 
   doSearch: async (q) => {
+    const seq = ++searchSeq; // 序号递增即作废此前在途请求
     set({ searchQuery: q });
     if (!q.trim()) {
       set({ searchResults: [] });
@@ -364,8 +373,10 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     }
     try {
       const results = await vault.search(q);
+      if (seq !== searchSeq) return; // 慢的旧响应不得覆盖新结果
       set({ searchResults: results });
     } catch (e) {
+      if (seq !== searchSeq) return;
       set({ error: String(e) });
     }
   },

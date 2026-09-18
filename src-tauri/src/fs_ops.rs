@@ -296,9 +296,12 @@ pub fn rename_entry(
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     db::rename_paths(conn, rel_path, &new_rel)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    // 重命名文件后，索引里的 title 需要更新
+    // 重命名文件后，索引里的 title 需要更新。
+    // 与 write_note 同纪律：优先 frontmatter title，而不是无脑退回文件名 stem
+    // （带 title: 的笔记重命名后 recents/favorites 显示不应回退）
     if target.is_file() {
-        let title = title_from_stem(&new_name);
+        let content = fs::read_to_string(&target).unwrap_or_default();
+        let title = extract_frontmatter_title(&content).unwrap_or_else(|| title_from_stem(&new_name));
         let _ = conn.execute(
             "UPDATE files SET title=?1 WHERE path=?2",
             params![title, new_rel],
@@ -353,6 +356,17 @@ pub fn move_entry(
     Ok(new_rel)
 }
 
+/// 回收站名冲突消解：`<ms>-<name>` 已存在则追加 -2、-3…
+fn trash_unique_name(trash_dir: &Path, base: String) -> String {
+    let mut name = base.clone();
+    let mut i = 2u32;
+    while trash_dir.join(&name).exists() {
+        name = format!("{base}-{i}");
+        i += 1;
+    }
+    name
+}
+
 /// 删除 → 回收站（铁律：永不硬删）。返回回收站内的相对路径。
 pub fn delete_entry(vault: &Path, rel_path: &str, conn: &Connection) -> std::io::Result<String> {
     let abs = resolve_in_vault(vault, rel_path)?;
@@ -360,8 +374,11 @@ pub fn delete_entry(vault: &Path, rel_path: &str, conn: &Connection) -> std::io:
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let trash_name = format!("{}-{}", now_ms(), name);
-    let trash_abs = safe_join(vault, TRASH_DIR)?.join(&trash_name);
+    let trash_dir = safe_join(vault, TRASH_DIR)?;
+    fs::create_dir_all(&trash_dir)?;
+    // 同毫秒删两个同名条目会撞名（此前 rename 报 AlreadyExists）→ 追加 -2、-3…
+    let trash_name = trash_unique_name(&trash_dir, format!("{}-{}", now_ms(), name));
+    let trash_abs = trash_dir.join(&trash_name);
     fs::rename(&abs, &trash_abs)?;
     db::remove_prefix(conn, rel_path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -466,6 +483,18 @@ pub fn save_asset(vault: &Path, bytes: &[u8], ext: &str) -> std::io::Result<Stri
             e
         }
     };
+    // 白名单（字母数字 + 点/加/连字符）：挡掉含 / 的 ext——
+    // 否则 `assets/<hash>.png/../evil` 可爬出 assets/ 落盘
+    // （resolve_in_vault 是第二道闸，此处挡在拼名之前）
+    if !ext
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '+' || c == '-')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("非法附件扩展名: {ext}"),
+        ));
+    }
     let full_hash = content_hash(bytes);
     let name = format!("{}.{}", &full_hash[..16.min(full_hash.len())], ext);
     // assets/ 本身是符号链接（或恶意 ext 构造的路径）时拒绝落盘
@@ -486,14 +515,18 @@ pub fn reindex(vault: &Path, conn: &Connection) -> std::io::Result<usize> {
     collect_notes(vault, vault, &mut on_disk)?;
     for rel in &on_disk {
         let abs = vault.join(rel);
-        let content = fs::read_to_string(&abs).unwrap_or_default();
+        // hash 必须基于**磁盘原始字节**：非 UTF-8（GBK 等）外来文件此前
+        // read_to_string 失败 → unwrap_or_default 得空串 → 入库 hash = sha256(空串)，
+        // 与磁盘字节不符（违反 files.hash 契约）
+        let bytes = fs::read(&abs).unwrap_or_default();
+        let content = String::from_utf8_lossy(&bytes).to_string();
         let mtime = fs::metadata(&abs)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let hash = content_hash(content.as_bytes());
+        let hash = content_hash(&bytes);
         let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let title = extract_frontmatter_title(&content).unwrap_or_else(|| title_from_stem(&name));
         db::upsert_file(conn, rel, &title, &content, mtime, &hash, true)
@@ -818,6 +851,69 @@ mod tests {
         assert!(p1.starts_with("assets/"));
         assert!(p1.ends_with(".png"));
         assert!(tmp.path().join(&p1).exists());
+    }
+
+    /// 回归：恶意 ext（含 / 或 .. 残留段）可拼出爬出 assets/ 的路径
+    #[test]
+    fn save_asset_rejects_hostile_ext() {
+        let (tmp, _conn) = setup();
+        assert!(save_asset(tmp.path(), b"x", "../evil").is_err());
+        assert!(save_asset(tmp.path(), b"x", "a/b").is_err());
+        assert!(save_asset(tmp.path(), b"x", "png/../evil").is_err());
+        // 归一化后为空（".."→""）走 bin 兜底，不算恶意
+        let p = save_asset(tmp.path(), b"x", "..").unwrap();
+        assert!(p.ends_with(".bin"));
+        // 正常 ext 不受影响（含大小写/点前缀/多点）
+        assert!(save_asset(tmp.path(), b"x", ".PNG").is_ok());
+        assert!(save_asset(tmp.path(), b"x", "tar.gz").is_ok());
+    }
+
+    /// 回归：回收站同毫秒同名删除撞名（此前 rename 报 AlreadyExists）
+    #[test]
+    fn trash_name_collision_suffixed() {
+        let (tmp, _conn) = setup();
+        let dir = tmp.path();
+        fs::create_dir_all(dir.join(TRASH_DIR)).unwrap();
+        // 无冲突 → 原名
+        assert_eq!(trash_unique_name(&dir.join(TRASH_DIR), "123-x.md".into()), "123-x.md");
+        fs::write(dir.join(format!("{TRASH_DIR}/123-x.md")), "").unwrap();
+        // 再删一个同毫秒同名的 → base 追加 -2
+        assert_eq!(
+            trash_unique_name(&dir.join(TRASH_DIR), "123-x.md".into()),
+            "123-x.md-2"
+        );
+    }
+
+    /// 回归：非 UTF-8（GBK）笔记 reindex 后 files.hash 必须等于磁盘字节 sha256
+    /// （此前 read_to_string 失败 → hash = sha256(空串)）
+    #[test]
+    fn reindex_hashes_raw_bytes_for_non_utf8() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        // GBK「中文」，非合法 UTF-8
+        let gbk: &[u8] = b"\xd6\xd0\xce\xc4";
+        fs::write(vault.join("gbk.md"), gbk).unwrap();
+        reindex(vault, &conn).unwrap();
+        let (_t, _b, _m, hash) = db::get_file(&conn, "gbk.md").unwrap().unwrap();
+        assert_eq!(hash, content_hash(gbk), "hash 基于磁盘原始字节");
+    }
+
+    /// 回归：重命名不得把 frontmatter title 降回文件名 stem（与 write_note 同纪律）
+    #[test]
+    fn rename_preserves_frontmatter_title() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let note = create_note(vault, "", "旧名.md").unwrap();
+        write_note(vault, &note.path, "---\ntitle: 真标题\n---\n内容", &conn).unwrap();
+        let new_path = rename_entry(vault, &note.path, "新名", &conn).unwrap();
+        let (title, _, _, _) = db::get_file(&conn, &new_path).unwrap().unwrap();
+        assert_eq!(title, "真标题", "重命名后 title 应保留 frontmatter 值");
+        // 无 frontmatter 的笔记仍回退到 stem
+        let n2 = create_note(vault, "", "b.md").unwrap();
+        write_note(vault, &n2.path, "纯正文", &conn).unwrap();
+        let p2 = rename_entry(vault, &n2.path, "c", &conn).unwrap();
+        let (t2, _, _, _) = db::get_file(&conn, &p2).unwrap().unwrap();
+        assert_eq!(t2, "c");
     }
 
     /// 回归：树必须保持「深度优先前序 + 目录内目录在前/按名升序」。

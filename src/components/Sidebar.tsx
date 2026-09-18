@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FileText, FolderPlus, History, Plus, RefreshCw, Search, Star } from "lucide-react";
 import { useVaultStore } from "../stores/vault";
 import { TreeView } from "./TreeView";
@@ -64,6 +64,17 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
     const t = setTimeout(() => void doSearch(q), 250);
     return () => clearTimeout(t);
   }, [q, doSearch]);
+
+  // 外部操作清空 store 查询（从树/最近/收藏开笔记）时同步清空输入框，
+  // 否则侧栏停留在旧搜索结果视图（本地 q 与 store searchQuery 脱钩）
+  const prevQuery = useRef(searchQuery);
+  useEffect(() => {
+    const prev = prevQuery.current;
+    prevQuery.current = searchQuery;
+    if (prev !== "" && searchQuery === "" && q !== "") {
+      setQ("");
+    }
+  }, [searchQuery, q]);
 
   /** 窄屏抽屉模式：打开笔记后收起侧栏 */
   const openNoteAndClose = (path: string) => {

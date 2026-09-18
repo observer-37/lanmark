@@ -202,7 +202,9 @@ function ClientPanel() {
           />
           <button
             disabled={!canPair || syncing}
-            onClick={() => void pair(url, code)}
+            // url 必须 trim：canPair 按 url.trim() 校验，不 trim 传入会让
+            // 尾随空格通过校验但在 Rust 侧解析失败
+            onClick={() => void pair(url.trim(), code)}
             className="w-full rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white shadow-slider hover:bg-accent-text disabled:opacity-40"
           >
             配对并保存

@@ -62,8 +62,12 @@ pub fn save_servers(app: &tauri::AppHandle, servers: &[ServerProfile]) -> Result
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(servers).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    // tmp+rename 原子写：写一半断电损坏 JSON → load 静默回退 → 全部已配 token 丢失
+    crate::fs_ops::atomic_write(
+        &path,
+        serde_json::to_string_pretty(servers).map_err(|e| e.to_string())?.as_bytes(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub fn normalize_url(raw: &str) -> Result<String, String> {

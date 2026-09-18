@@ -226,10 +226,13 @@ fn make_snippet(body: &str, q: &str) -> Option<String> {
     let lower_q = q.to_lowercase();
     let byte_idx = lower_body.find(&lower_q)?;
     let chars: Vec<char> = body.chars().collect();
-    // 把字节位置换算成字符位置
-    let char_idx = body[..byte_idx].chars().count();
+    // 字符位置在**小写化串**内计算（byte_idx 对 lower_body 合法），
+    // 再映射回原串时 clamp：to_lowercase 可让单字符展开（İ→i̇），
+    // 原串字符数可能略少——直接用小写字节位置切原串会落 char 边界外
+    // 而 panic（发生在持 DB 锁期间，release panic=abort 直接杀进程）
+    let char_idx = lower_body[..byte_idx].chars().count().min(chars.len());
     let start = char_idx.saturating_sub(40);
-    let end = (char_idx + q.chars().count() + 40).min(chars.len());
+    let end = (char_idx + lower_q.chars().count() + 40).min(chars.len());
     let mut s: String = chars[start..end].iter().collect();
     if start > 0 {
         s = format!("…{s}");
@@ -272,6 +275,23 @@ mod tests {
         upsert_file(&c, "异步编程.md", "异步编程", "正文没有关键词", 2, "", true).unwrap();
         let hits = search(&c, "异步编程", 20).unwrap();
         assert_eq!(hits[0].path, "异步编程.md");
+    }
+
+    /// 回归：小写化单字符展开（İ→i̇，1→2 字符）使 lower 串位置超过原串
+    /// 长度——旧实现用小写字节索引切原串，落 char 边界外/越界 → panic
+    /// （发生在 with_db 持锁期间，release panic=abort 直接杀进程）
+    #[test]
+    fn snippet_survives_lowercase_expansion() {
+        let s = make_snippet("İİ X", "X").unwrap();
+        assert!(s.contains("X"));
+        let s2 = make_snippet("前 İİİ 后文", "后文").unwrap();
+        assert!(s2.contains("后文"));
+        // 命中小写化展开形态本身
+        let s3 = make_snippet("İİ X", "i̇").unwrap();
+        assert!(!s3.is_empty());
+        // 正常路径不变
+        let s4 = make_snippet("hello world", "WORLD").unwrap();
+        assert!(s4.contains("hello world"));
     }
 
     #[test]

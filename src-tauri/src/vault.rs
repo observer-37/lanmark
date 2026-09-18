@@ -42,7 +42,9 @@ pub fn save_config(app: &tauri::AppHandle, cfg: &AppConfig) -> std::io::Result<(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(cfg)?)?;
+    // tmp+rename 原子写：此前直接 fs::write，写一半断电会损坏 JSON，
+    // load 端静默回退默认 → vault 配置丢失
+    crate::fs_ops::atomic_write(&path, serde_json::to_string_pretty(cfg)?.as_bytes())?;
     Ok(())
 }
 

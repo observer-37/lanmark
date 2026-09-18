@@ -18,7 +18,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# 钉死 tauri 版本：patches/tauri-runtime-wry 是 2.11.4 的 vendor 补丁（[patch.crates-io]）。
+# 若 caret 浮动让 cargo update 把 tauri 升到依赖 tauri-runtime-wry ≥2.12 的版本，
+# 补丁将不再匹配 → 构建失败或白屏 bug（tauri#15671）回归。
+# 升级 tauri 时必须同步重做补丁（见 patches/README.md）并解除此 pin。
+tauri = { version = "=2.11.5", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -44,7 +48,7 @@ panic = "abort"
 strip = true
 
 [dev-dependencies]
-base64 = "0.23.1"
+# base64 已在 dependencies（dev 作用域自动继承，重复声明是冗余）
 tempfile = "3.27.0"
 
 # tauri#15671：移动端零窗口时 Resumed 事件被丢弃 → FGS 保活进程重开白屏。
