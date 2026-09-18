@@ -277,11 +277,13 @@ pub fn write_conflict_copy(
         }
         if kind == "note" {
             let content = String::from_utf8_lossy(bytes).to_string();
-            // 直接落盘（不经 write_note 的原路径语义），再手工进索引
+            // 直接落盘（不经 write_note 的原路径语义），再手工进索引。
+            // 落盘用**原始字节**（非 UTF-8 服务器版本不损坏，与 hash 一致），
+            // 索引 body 用 lossy 文本；tmp+rename 原子写，与笔记落盘同纪律
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&abs, &content)?;
+            fs_ops::atomic_write(&abs, bytes)?;
             let title = fs_ops::extract_frontmatter_title(&content)
                 .unwrap_or_else(|| fs_ops::title_from_stem(&candidate));
             crate::db::upsert_file(conn, &candidate, &title, &content, now_ms, &fs_ops::content_hash(bytes), true)
@@ -290,7 +292,7 @@ pub fn write_conflict_copy(
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&abs, bytes)?;
+            fs_ops::atomic_write(&abs, bytes)?;
         }
         return Ok(candidate);
     }
@@ -408,5 +410,27 @@ mod tests {
         assert_ne!(c1, c2);
         assert!(c2.contains("-2.md") || !c2.starts_with("工作/笔记-冲突0917-0830.md"));
         assert!(dir.path().join(&c2).exists());
+    }
+
+    /// 回归：冲突副本落盘必须用原始字节。此前 note 分支写 lossy String，
+    /// 非 UTF-8（如 GBK）服务器版本会变成乱码副本，且与 hash 不一致。
+    #[test]
+    fn write_conflict_copy_preserves_non_utf8_bytes() {
+        use crate::commands::open_vault_at;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let state = Arc::new(AppState::default());
+        open_vault_at(&state, dir.path()).unwrap();
+        let conn = state.db.lock().unwrap();
+        let conn = conn.as_ref().unwrap();
+
+        // GBK 字节（"中文" 的 GBK 编码），非合法 UTF-8
+        let gbk = b"\xd6\xd0\xce\xc4";
+        let c = write_conflict_copy(dir.path(), conn, "n.md", "note", gbk, 1_789_633_800_000)
+            .unwrap();
+        let on_disk = std::fs::read(dir.path().join(&c)).unwrap();
+        assert_eq!(on_disk, gbk, "磁盘字节必须与服务器版本一致");
+        let (_t, _body, _mtime, hash) = crate::db::get_file(conn, &c).unwrap().unwrap();
+        assert_eq!(hash, fs_ops::content_hash(gbk), "索引 hash 基于原始字节");
     }
 }

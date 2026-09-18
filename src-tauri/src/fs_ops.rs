@@ -263,6 +263,15 @@ pub fn move_entry(
             "不能移动到自身内部",
         ));
     }
+    // 移到当前所在目录 = 无操作：否则 unique_target 把条目自己当「已存在」，
+    // 会把它改名为 x-2（真机 review 发现的数据损坏路径）
+    let parent_rel = rel_path
+        .rsplit_once('/')
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_default();
+    if new_dir_rel_norm == parent_rel {
+        return Ok(rel_path.to_string());
+    }
     let name = old_abs
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -321,6 +330,25 @@ pub fn content_hash(b: &[u8]) -> String {
     h.finalize().iter().map(|x| format!("{x:02x}")).collect()
 }
 
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 原子写 tmp 路径：原名 + pid + 单调序号。
+/// 固定名（`.md.lanmark-tmp`）会让「UI 保存」与「sync push」并发写同一文件时
+/// 互相踩踏（一方 rename ENOENT，或把对方写一半的截断文件落成正式笔记）。
+fn tmp_path_for(abs: &Path) -> PathBuf {
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let parent = abs.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{name}.{}.{}.lanmark-tmp", std::process::id(), seq))
+}
+
+/// 原子写（tmp+rename）。崩溃最多留一个孤儿 tmp，绝不产生截断的正式文件。
+pub fn atomic_write(abs: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = tmp_path_for(abs);
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, abs)
+}
+
 /// 写入（tmp+rename 原子落盘），更新索引。返回 (mtime_ms, hash)。
 pub fn write_note(
     vault: &Path,
@@ -329,9 +357,7 @@ pub fn write_note(
     conn: &Connection,
 ) -> std::io::Result<(i64, String)> {
     let abs = safe_join(vault, rel_path)?;
-    let tmp = abs.with_extension("md.lanmark-tmp");
-    fs::write(&tmp, content)?;
-    fs::rename(&tmp, &abs)?;
+    atomic_write(&abs, content.as_bytes())?;
     let mtime = now_ms();
     let hash = content_hash(content.as_bytes());
     let title = extract_frontmatter_title(content)
@@ -350,9 +376,7 @@ pub fn write_note_bytes(
     conn: &Connection,
 ) -> std::io::Result<(i64, String)> {
     let abs = safe_join(vault, rel_path)?;
-    let tmp = abs.with_extension("md.lanmark-tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, &abs)?;
+    atomic_write(&abs, bytes)?;
     let mtime = now_ms();
     let hash = content_hash(bytes);
     let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -521,6 +545,78 @@ mod tests {
         assert!(vault.join("b/a/n.md").exists());
         assert!(db::get_file(&conn, "b/a/n.md").unwrap().is_some());
         assert!(db::get_file(&conn, "a/n.md").unwrap().is_none());
+    }
+
+    /// 回归：移到「当前所在目录」必须是无操作。
+    /// 此前 unique_target 把条目自己当「已存在」，`x.md` 会被改名 `x-2.md`（数据损坏）。
+    #[test]
+    fn move_to_current_dir_is_noop() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let f = create_folder(vault, "", "工作").unwrap();
+        let note = create_note(vault, &f.path, "n.md").unwrap();
+        write_note(vault, &note.path, "内容", &conn).unwrap();
+
+        // 笔记 → 当前目录
+        assert_eq!(move_entry(vault, &note.path, "工作", &conn).unwrap(), note.path);
+        assert!(vault.join(&note.path).exists());
+        assert!(!vault.join("工作/n-2.md").exists());
+
+        // 文件夹 → 自身父目录
+        let root_note = create_note(vault, "", "r.md").unwrap();
+        assert_eq!(move_entry(vault, &root_note.path, "", &conn).unwrap(), root_note.path);
+        assert!(!vault.join("r-2.md").exists());
+    }
+
+    /// tmp 路径必须唯一（pid+序号），并发写同一文件不互相踩踏。
+    /// 场景：UI 保存 与 sync push 同时写同一笔记（此前固定 tmp 名，
+    /// 一方 rename ENOENT，或把对方写一半的截断文件落成正式笔记）。
+    #[test]
+    fn atomic_write_tmp_unique_and_concurrent_safe() {
+        let p = PathBuf::from("/tmp/x.md");
+        let a = tmp_path_for(&p);
+        let b = tmp_path_for(&p);
+        assert_ne!(a, b, "两次调用必须得到不同 tmp 名");
+        assert!(a.to_string_lossy().contains(".lanmark-tmp"));
+
+        let (tmp, _conn) = setup();
+        let vault = tmp.path();
+        let target = vault.join("hot.md");
+        fs::write(&target, "初始").unwrap();
+
+        // 两线程各写 50 轮同一文件：双方都必须成功，
+        // 且最终文件内容是某一方写入的完整内容（不出现截断/ENOENT）
+        let t1 = std::thread::spawn({
+            let t = target.clone();
+            move || {
+                for i in 0..50 {
+                    atomic_write(&t, format!("A{}", i).as_bytes()).unwrap();
+                }
+            }
+        });
+        let t2 = std::thread::spawn({
+            let t = target.clone();
+            move || {
+                for i in 0..50 {
+                    atomic_write(&t, format!("B{}", i).as_bytes()).unwrap();
+                }
+            }
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        let final_body = fs::read_to_string(&target).unwrap();
+        assert!(
+            final_body.starts_with('A') || final_body.starts_with('B'),
+            "最终内容应是某次完整写入: {final_body:?}"
+        );
+        // 并发结束后不留孤儿 tmp
+        let leftovers: Vec<_> = fs::read_dir(vault)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".lanmark-tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 
     #[test]
