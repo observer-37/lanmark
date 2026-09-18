@@ -144,10 +144,15 @@ pub fn asset_walk(vault: &Path) -> std::io::Result<Vec<FileMeta>> {
     }
     for entry in std::fs::read_dir(&assets)? {
         let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
+        // file_type 不跟随符号链接：assets/ 内的链接不进同步清单
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() || !ft.is_file() {
             continue;
         }
+        let path = entry.path();
         let bytes = std::fs::read(&path)?;
         let rel = format!(
             "{}/{}",

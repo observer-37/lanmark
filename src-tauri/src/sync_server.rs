@@ -314,14 +314,15 @@ fn write_pushed_file(
                         )
                         .map_err(|e| format!("冲突副本落盘失败: {e}"))?;
                         // 从原位置移除（已在副本中），避免 write_note 覆盖两份一样
-                        let abs = fs_ops::safe_join(vault, &pf.path).map_err(|e| e.to_string())?;
+                        let abs = fs_ops::resolve_in_vault(vault, &pf.path).map_err(|e| e.to_string())?;
                         let _ = std::fs::remove_file(&abs);
                         conflict_saved_as = Some(saved);
                     }
                 }
             }
-            // 同步场景父目录可能尚不存在（对端先建的笔记在其目录里）
-            if let Some(parent) = fs_ops::safe_join(vault, &pf.path)
+            // 同步场景父目录可能尚不存在（对端先建的笔记在其目录里）；
+            // 目录须通过符号链接逃逸校验（否则 create_dir_all 会在 vault 外建目录）
+            if let Some(parent) = fs_ops::resolve_in_vault(vault, &pf.path)
                 .map_err(|e| e.to_string())?
                 .parent()
                 .map(|p| p.to_path_buf())
@@ -342,7 +343,7 @@ fn write_pushed_file(
             if !pf.path.starts_with("assets/") || pf.path.contains("..") {
                 return Err(format!("附件路径非法: {}", pf.path));
             }
-            let abs = fs_ops::safe_join(vault, &pf.path).map_err(|e| e.to_string())?;
+            let abs = fs_ops::resolve_in_vault(vault, &pf.path).map_err(|e| e.to_string())?;
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
             }

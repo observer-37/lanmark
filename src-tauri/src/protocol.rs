@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use tauri::http::{header, Response, StatusCode};
 
-use crate::fs_ops::safe_join;
 use crate::vault::AppState;
 
 /// 解析 vault 协议请求路径 → 文件内容（或 404）。同步纯逻辑，可单测。
@@ -20,7 +19,8 @@ pub fn resolve(state: &Arc<AppState>, raw_path: &str) -> Option<(String, Vec<u8>
         return None;
     }
     let vault = state.vault.lock().ok()?.as_ref().cloned()?;
-    let abs = safe_join(Path::new(&vault), &rel).ok()?;
+    // resolve_in_vault = safe_join + 符号链接逃逸校验（链接指向 vault 外 → 404）
+    let abs = crate::fs_ops::resolve_in_vault(Path::new(&vault), &rel).ok()?;
     if !abs.is_file() {
         return None;
     }
@@ -120,6 +120,23 @@ mod tests {
     fn resolve_404_without_open_vault() {
         let state = Arc::new(AppState::default());
         assert!(resolve(&state, "/a.md").is_none());
+    }
+
+    /// 回归：符号链接指向 vault 外时 vault:// 不得服务外部文件
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rejects_symlink_escape() {
+        let (dir, state) = vault_with_files();
+        let outside = dir.path().parent().unwrap().join(format!("outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.png"), b"outside-bytes").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.path().join("linkdir")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.png"), dir.path().join("link.png")).unwrap();
+        let res = resolve(&state, "/linkdir/secret.png");
+        let res2 = resolve(&state, "/link.png");
+        assert!(res.is_none(), "目录链接逃逸必须 404: {res:?}");
+        assert!(res2.is_none(), "文件链接逃逸必须 404: {res2:?}");
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

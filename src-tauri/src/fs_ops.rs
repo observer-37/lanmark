@@ -48,6 +48,43 @@ pub fn safe_join(vault: &Path, rel: &str) -> std::io::Result<PathBuf> {
     Ok(vault.join(rel))
 }
 
+/// 解析 vault 相对路径并校验不越出 vault（防符号链接逃逸）。
+///
+/// `safe_join` 只挡字符串层面的 `..`/绝对路径，挡不住 vault 内的符号链接：
+/// 远程 sync push「linkdir/evil.md」（linkdir → /etc）会写到 vault 外，
+/// delete 同理。这里用 canonicalize 做真路径判定：路径尚不存在（新建）时
+/// 以最近存在的祖先目录为准，不存在段拼回规范化祖先之后。
+pub fn resolve_in_vault(vault: &Path, rel: &str) -> std::io::Result<PathBuf> {
+    let abs = safe_join(vault, rel)?;
+    // 向上找最近存在的祖先（abs 本身可能尚不存在）
+    let mut existing = abs.clone();
+    loop {
+        if existing.exists() {
+            break;
+        }
+        match existing.parent() {
+            Some(p) if !p.as_os_str().is_empty() => existing = p.to_path_buf(),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "路径不存在且无法定位祖先目录",
+                ))
+            }
+        }
+    }
+    let canon = existing.canonicalize()?;
+    let canon_vault = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
+    if !canon.starts_with(&canon_vault) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "路径经符号链接越出 vault",
+        ));
+    }
+    // 校验通过：返回原拼接路径（后续 rel 计算以 vault 前缀为准，
+    // 若 vault 本身含符号链接段，canonicalize 后的路径无法 strip_prefix）
+    Ok(abs)
+}
+
 /// 目录相对路径解析：空串 = vault 根
 fn dir_for(vault: &Path, dir_rel: &str) -> std::io::Result<PathBuf> {
     let rel = dir_rel.trim();
@@ -84,19 +121,33 @@ pub fn list_tree(vault: &Path) -> std::io::Result<Vec<Node>> {
 fn walk(root: &Path, dir: &Path, out: &mut Vec<Node>) -> std::io::Result<()> {
     // 逐目录排序（目录在前、按名升序）；⚠️ 不能对整棵树做全局 (kind, name) 排序——
     // 那会把不同层级的同名序节点穿插在一起，破坏「子项紧跟父目录」的深度优先序
-    let mut entries: Vec<std::fs::DirEntry> = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|e| {
-        let is_dir = e.path().is_dir();
-        (!is_dir, e.file_name().to_string_lossy().to_lowercase())
+    // file_type() 不跟随符号链接（path.is_dir() 会），遍历必须用前者
+    let mut entries: Vec<(std::fs::DirEntry, Option<std::fs::FileType>)> =
+        fs::read_dir(dir)?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|e| {
+                let ft = e.file_type().ok();
+                (e, ft)
+            })
+            .collect();
+    entries.sort_by_key(|(e, ft)| {
+        (ft.map_or(false, |f| !f.is_dir()), e.file_name().to_string_lossy().to_lowercase())
     });
-    for entry in entries {
-        let path = entry.path();
+    for (entry, ft) in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         if name == META_DIR || name.starts_with('.') {
             continue;
         }
+        // 符号链接一律跳过：指向 vault 外的链接会把外部文件列进树/索引/同步清单
+        // （内容经同步服务器明文外发），链接循环则使递归栈溢出
+        if ft.map_or(false, |f| f.is_symlink()) {
+            log::warn!("vault 内符号链接已跳过: {name}");
+            continue;
+        }
+        let path = entry.path();
         let rel = rel_to_string(path.strip_prefix(root).unwrap());
-        if path.is_dir() {
+        if ft.map_or(false, |f| f.is_dir()) {
             out.push(Node { path: rel, kind: "folder".into(), name, title: None });
             walk(root, &path, out)?;
         } else if is_note_file(&path) {
@@ -154,6 +205,11 @@ fn resolve_target(
             format!("目录不存在: {dir_rel}"),
         ));
     }
+    // 目标目录不得经符号链接越出 vault（否则新建笔记会落到 vault 外）
+    let trimmed = dir_rel.trim();
+    if !trimmed.is_empty() && trimmed != "." {
+        resolve_in_vault(vault, trimmed)?;
+    }
     let name = sanitize_filename_with_ext(raw_name);
     let name = if is_windows_reserved_base(&name) {
         format!("n-{name}")
@@ -202,7 +258,7 @@ pub fn rename_entry(
     new_raw_name: &str,
     conn: &Connection,
 ) -> std::io::Result<String> {
-    let old_abs = safe_join(vault, rel_path)?;
+    let old_abs = resolve_in_vault(vault, rel_path)?;
     let parent = old_abs
         .parent()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "无父目录"))?
@@ -249,7 +305,7 @@ pub fn move_entry(
     new_dir_rel: &str,
     conn: &Connection,
 ) -> std::io::Result<String> {
-    let old_abs = safe_join(vault, rel_path)?;
+    let old_abs = resolve_in_vault(vault, rel_path)?;
     let new_dir = dir_for(vault, new_dir_rel)?;
     if !new_dir.is_dir() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "目标目录不存在"));
@@ -257,6 +313,10 @@ pub fn move_entry(
     // 不能移动到自身或自己的子目录
     let self_prefix = format!("{}/", rel_path);
     let new_dir_rel_norm = new_dir_rel.trim_matches('/');
+    // 目标目录不得经符号链接越出 vault
+    if !new_dir_rel_norm.is_empty() {
+        resolve_in_vault(vault, new_dir_rel_norm)?;
+    }
     if new_dir_rel_norm == rel_path || new_dir_rel_norm.starts_with(&self_prefix) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -286,7 +346,7 @@ pub fn move_entry(
 
 /// 删除 → 回收站（铁律：永不硬删）。返回回收站内的相对路径。
 pub fn delete_entry(vault: &Path, rel_path: &str, conn: &Connection) -> std::io::Result<String> {
-    let abs = safe_join(vault, rel_path)?;
+    let abs = resolve_in_vault(vault, rel_path)?;
     let name = abs
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -317,7 +377,7 @@ pub fn extract_frontmatter_title(content: &str) -> Option<String> {
 }
 
 pub fn read_note(vault: &Path, rel_path: &str) -> std::io::Result<String> {
-    let abs = safe_join(vault, rel_path)?;
+    let abs = resolve_in_vault(vault, rel_path)?;
     if !abs.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "笔记不存在"));
     }
@@ -356,7 +416,7 @@ pub fn write_note(
     content: &str,
     conn: &Connection,
 ) -> std::io::Result<(i64, String)> {
-    let abs = safe_join(vault, rel_path)?;
+    let abs = resolve_in_vault(vault, rel_path)?;
     atomic_write(&abs, content.as_bytes())?;
     let mtime = now_ms();
     let hash = content_hash(content.as_bytes());
@@ -375,7 +435,7 @@ pub fn write_note_bytes(
     bytes: &[u8],
     conn: &Connection,
 ) -> std::io::Result<(i64, String)> {
-    let abs = safe_join(vault, rel_path)?;
+    let abs = resolve_in_vault(vault, rel_path)?;
     atomic_write(&abs, bytes)?;
     let mtime = now_ms();
     let hash = content_hash(bytes);
@@ -399,6 +459,8 @@ pub fn save_asset(vault: &Path, bytes: &[u8], ext: &str) -> std::io::Result<Stri
     };
     let full_hash = content_hash(bytes);
     let name = format!("{}.{}", &full_hash[..16.min(full_hash.len())], ext);
+    // assets/ 本身是符号链接（或恶意 ext 构造的路径）时拒绝落盘
+    resolve_in_vault(vault, &format!("{ASSETS_DIR}/{name}"))?;
     let assets = safe_join(vault, ASSETS_DIR)?;
     fs::create_dir_all(&assets)?;
     let target = assets.join(&name);
@@ -457,12 +519,20 @@ fn collect_notes(
 ) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if name == META_DIR || name.starts_with('.') {
             continue;
         }
-        if path.is_dir() {
+        // 符号链接跳过（与 walk 同纪律）：不进索引 → 不进同步清单
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
             collect_notes(root, &path, out)?;
         } else if is_note_file(&path) {
             out.insert(rel_to_string(path.strip_prefix(root).unwrap()));
@@ -640,6 +710,54 @@ mod tests {
         assert!(safe_join(tmp.path(), "/绝对").is_err());
         assert!(safe_join(tmp.path(), "a\\b").is_err());
         assert!(safe_join(tmp.path(), "正常/子目录").is_ok());
+    }
+
+    /// 回归：vault 内符号链接必须被跳过——
+    /// 目录链接会把外部文件列进树/索引/同步清单（内容经同步服务器明文外发），
+    /// 链接循环会使递归栈溢出
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_skipped_in_walk_reindex_and_guarded_on_ops() {
+        let (tmp, conn) = setup();
+        let vault = tmp.path();
+        let outside = tmp
+            .path()
+            .parent()
+            .unwrap()
+            .join(format!("outside-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(outside.join("外部目录")).unwrap();
+        std::fs::write(outside.join("secret.md"), "# 外部秘密").unwrap();
+        std::fs::write(outside.join("外部目录/深.md"), "# 深").unwrap();
+
+        std::os::unix::fs::symlink(&outside, vault.join("外部链接")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), vault.join("秘密.md")).unwrap();
+        std::fs::create_dir_all(vault.join("循环")).unwrap();
+        std::os::unix::fs::symlink(vault, vault.join("循环/loop")).unwrap();
+
+        // 树：链接与循环都不出现
+        let tree = list_tree(vault).unwrap();
+        assert!(tree.iter().all(|n| n.name != "外部链接" && n.name != "秘密.md"));
+        assert!(tree.iter().all(|n| !n.path.contains("loop")));
+
+        // 索引：链接文件不进 reindex
+        let n = reindex(vault, &conn).unwrap();
+        assert_eq!(n, 0, "符号链接文件不得入索引");
+
+        // 读写删均拒绝链接路径（防止经 IPC/sync 落到 vault 外）
+        assert!(read_note(vault, "秘密.md").is_err());
+        assert!(write_note(vault, "秘密.md", "pwn", &conn).is_err());
+        assert!(delete_entry(vault, "秘密.md", &conn).is_err());
+        assert!(write_note(vault, "外部链接/evil.md", "x", &conn).is_err());
+        assert!(save_asset(vault, b"x", "png")
+            .is_ok(), "正常 assets 写入不受影响");
+
+        // 普通不存在路径（新建）与 vault 内路径放行
+        assert!(resolve_in_vault(vault, "新笔记.md").is_ok());
+        assert!(resolve_in_vault(vault, "循环/ok.md").is_ok());
+        // 字符串逃逸仍被挡
+        assert!(resolve_in_vault(vault, "../x").is_err());
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
