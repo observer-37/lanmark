@@ -80,6 +80,7 @@ pub fn run() {
             ping,
             commands::vault_status,
             commands::vault_set_path,
+            commands::vault_ensure_dir,
             commands::vault_open_path,
             commands::reindex_vault,
             commands::tree_list,
@@ -111,17 +112,29 @@ pub fn run() {
 
     // Android：上滑划掉 Activity 会触发 tao 的 process::exit(0) 连前台服务一起杀
     // （tauri#15671）——必须 prevent_exit 保住同步服务器进程；
-    // 划掉后重开白屏（wry 无法给新 Activity 建 webview）→ Resumed 时 webview 空则重建。
+    // 划掉后重开白屏（新 activity 的窗口拿不到绑定，webview 永不创建，真机 2026-09-18
+    // 验收复现）。ExitRequested = activity 销毁的确定信号（置标志），下一次 Resumed
+    // 销毁残留旧窗口 + 重建（经 next_available_activity 绑定到新 activity）。
+    // 普通切后台恢复不经过 ExitRequested → 不动窗口，无副作用。
+    #[cfg(target_os = "android")]
+    static ACTIVITY_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     #[cfg(target_os = "android")]
     app.run(|app, event| match event {
         tauri::RunEvent::ExitRequested { api, .. } => {
             api.prevent_exit();
+            ACTIVITY_LOST.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         tauri::RunEvent::Resumed { .. } => {
-            if app.webview_windows().is_empty() {
+            if ACTIVITY_LOST.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 use tauri::WebviewUrl;
-                let _ = tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                    .build();
+                let labels: Vec<String> = app.webview_windows().keys().cloned().collect();
+                for label in labels {
+                    if let Some(w) = app.get_webview_window(&label) {
+                        let _ = w.destroy();
+                    }
+                }
+                let _ =
+                    tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::default()).build();
             }
         }
         _ => {}

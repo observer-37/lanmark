@@ -87,6 +87,18 @@ pub fn pick_and_set_op(state: &Arc<AppState>, path: &Path, mode: &str) -> CmdRes
     open_vault_at(state, path)
 }
 
+/// Android 首启「应用目录」场景：目录可能尚不存在，先创建（含父目录）。
+/// 路径安全：只允许绝对路径、拒绝 .. 段与非法字符。
+#[tauri::command]
+pub fn vault_ensure_dir(path: String) -> CmdResult<String> {
+    let p = PathBuf::from(&path);
+    if !p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(format!("非法路径: {path}"));
+    }
+    std::fs::create_dir_all(&p).map_err(|e| format!("创建目录失败: {e}"))?;
+    Ok(path)
+}
+
 /// 直接按路径打开 vault（设置页 / 测试用）
 #[tauri::command]
 pub fn vault_open_path(state: State<Arc<AppState>>, path: String) -> CmdResult<String> {

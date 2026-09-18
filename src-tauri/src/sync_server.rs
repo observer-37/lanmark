@@ -228,7 +228,8 @@ async fn pull(
                 path: path.clone(),
                 kind: meta.kind.clone(),
                 content_base64: b64_encode(&bytes),
-                hash: meta.hash.clone(),
+                // 实际字节 hash：与所发内容严格一致，DB/清单可能因外部改动过时
+                hash: fs_ops::content_hash(&bytes),
                 mtime_ms: meta.mtime_ms,
             }),
             Err(e) => missing.push((path.clone(), format!("读取失败: {e}"))),
@@ -319,18 +320,33 @@ fn write_pushed_file(
                     }
                 }
             }
-            // write_note：tmp+rename 原子落盘 + 更新索引
-            fs_ops::write_note(vault, &pf.path, &String::from_utf8_lossy(&bytes), conn)
-                .map_err(|e| format!("写入失败: {e}"))?;
+            // 同步场景父目录可能尚不存在（对端先建的笔记在其目录里）
+            if let Some(parent) = fs_ops::safe_join(vault, &pf.path)
+                .map_err(|e| e.to_string())?
+                .parent()
+                .map(|p| p.to_path_buf())
+            {
+                std::fs::create_dir_all(&parent).map_err(|e| format!("创建目录失败: {e}"))?;
+            }
+            // write_note：tmp+rename 原子落盘 + 更新索引（非 UTF-8 字节级保真）
+            match std::str::from_utf8(&bytes) {
+                Ok(content) => fs_ops::write_note(vault, &pf.path, content, conn),
+                Err(_) => fs_ops::write_note_bytes(vault, &pf.path, &bytes, conn),
+            }
+            .map_err(|e| format!("写入失败: {e}"))?;
             Ok(conflict_saved_as)
         }
         "asset" => {
-            // 附件内容寻址：重算名字必须与声称路径一致（否则视为数据错乱）
-            let ext = pf.path.rsplit('.').next().unwrap_or("bin").to_string();
-            let saved = crate::commands::asset_save_op(&ctx.app, &pf.content_base64, &ext)?;
-            if saved != pf.path {
-                return Err(format!("附件路径与内容不符（期望 {} 实际 {}）", pf.path, saved));
+            // 附件按原路径落盘（内容 hash 已在上方验证）：vault 里的附件可能
+            // 不是内容寻址名（Obsidian 导入/演示库的人名文件），路径即身份
+            if !pf.path.starts_with("assets/") || pf.path.contains("..") {
+                return Err(format!("附件路径非法: {}", pf.path));
             }
+            let abs = fs_ops::safe_join(vault, &pf.path).map_err(|e| e.to_string())?;
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+            }
+            std::fs::write(&abs, &bytes).map_err(|e| format!("附件写入失败: {e}"))?;
             Ok(None)
         }
         other => Err(format!("未知类型: {other}")),

@@ -26,8 +26,10 @@ interface VaultStore {
   pickVault: (mode: "open" | "create") => Promise<void>;
   /** Android：SAF 选择器已给出真实路径，直接开库 */
   pickAndroidFolder: (mode: "open" | "create") => Promise<void>;
-  /** Android：回退到应用私有目录（M1 行为，无需授权） */
+  /** Android：应用私有外部目录（零权限，Android 16 唯一可靠路径） */
   pickAppDir: (mode: "open" | "create") => Promise<void>;
+  /** Android：自定义路径（需 MANAGE_EXTERNAL_STORAGE；Documents/Download 不可用） */
+  pickCustomAndroidDir: (path: string, mode: "open" | "create") => Promise<void>;
   refreshTree: () => Promise<void>;
   refreshMeta: () => Promise<void>;
   reindex: () => Promise<void>;
@@ -118,9 +120,23 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
   pickAppDir: async (mode) => {
     try {
-      const { documentDir } = await import("@tauri-apps/api/path");
-      const path = await documentDir();
-      const ready = await vault.setPath(path, mode);
+      // Android 16 真机验收结论：SAF 禁选 Documents/Download，应用私有外部目录
+      // 是唯一零权限且 std::fs 可靠可写的位置
+      // Android 16 真机验收：SAF 禁选 Documents/Download 本身（子目录待验），
+      // 应用私有外部目录是零权限兜底路径
+      const path = "/storage/emulated/0/Android/data/com.lanmark.app/files/lanmark-vault";
+      const ready = await vault.setPathWithCreate(path, mode);
+      set({ status: "ready", vaultPath: ready, activePath: null, content: "", dirty: false });
+      await get().refreshTree();
+      await get().refreshMeta();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  pickCustomAndroidDir: async (path, mode) => {
+    try {
+      const ready = await vault.setPathWithCreate(path, mode);
       set({ status: "ready", vaultPath: ready, activePath: null, content: "", dirty: false });
       await get().refreshTree();
       await get().refreshMeta();

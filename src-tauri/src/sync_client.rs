@@ -184,19 +184,42 @@ fn store_pulled(vault: &Path, conn: &rusqlite::Connection, f: &crate::sync::Pull
     }
     match f.kind.as_str() {
         "note" => {
-            let content = String::from_utf8_lossy(&bytes).to_string();
-            match fs_ops::write_note(vault, &f.path, &content, conn) {
-                Ok(_) => None,
-                Err(e) => Some(format!("{}: 写入失败: {e}", f.path)),
+            // 同步场景父目录可能尚不存在（对端先建的笔记在其目录里）
+            if let Some(parent) = fs_ops::safe_join(vault, &f.path)
+                .map_err(|e| e.to_string())
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            {
+                if let Err(e) = std::fs::create_dir_all(&parent) {
+                    return Some(format!("{}: 创建目录失败: {e}", f.path));
+                }
+            }
+            // 非 UTF-8 的 .md（GBK 等外来文件）字节级原样落盘；索引 body 用 lossy 文本
+            match std::str::from_utf8(&bytes) {
+                Ok(content) => match fs_ops::write_note(vault, &f.path, content, conn) {
+                    Ok(_) => None,
+                    Err(e) => Some(format!("{}: 写入失败: {e}", f.path)),
+                },
+                Err(_) => match fs_ops::write_note_bytes(vault, &f.path, &bytes, conn) {
+                    Ok(_) => None,
+                    Err(e) => Some(format!("{}: 写入失败: {e}", f.path)),
+                },
             }
         }
-        "asset" => match fs_ops::save_asset(vault, &bytes, &{
-            f.path.rsplit('.').next().unwrap_or("bin").to_string()
-        }) {
-            Ok(saved) if saved == f.path => None,
-            Ok(saved) => Some(format!("{}: 附件路径不符（实际 {saved}）", f.path)),
-            Err(e) => Some(format!("{}: 写入失败: {e}", f.path)),
-        },
+        "asset" => {
+            // 附件按原路径落盘（内容 hash 已验证），与服务器 push 同语义
+            if !f.path.starts_with("assets/") || f.path.contains("..") {
+                return Some(format!("{}: 附件路径非法", f.path));
+            }
+            let abs = match fs_ops::safe_join(vault, &f.path) {
+                Ok(a) => a,
+                Err(e) => return Some(format!("{}: 路径非法: {e}", f.path)),
+            };
+            if let Err(e) = std::fs::write(&abs, &bytes) {
+                return Some(format!("{}: 附件写入失败: {e}", f.path));
+            }
+            None
+        }
         other => Some(format!("{}: 未知类型 {other}", f.path)),
     }
 }
@@ -264,6 +287,14 @@ pub fn sync_round(state: &Arc<AppState>, profile: &ServerProfile) -> Result<Sync
         .ok_or("尚未打开 vault")?;
     let mut report = SyncReport::default();
     let c = client();
+
+    // 0. 本地重索引：外部改动（其他编辑器/App 直接改 vault 文件）后 DB 缓存
+    //    可能缺文件或 hash 过时——同步回合必须以磁盘为准（M1 契约：磁盘是事实源）
+    {
+        let conn_guard = state.db.lock().map_err(|_| "DB 锁中毒".to_string())?;
+        let conn = conn_guard.as_ref().ok_or("尚未打开 vault")?;
+        fs_ops::reindex(&vault, conn).map_err(|e| format!("重索引失败: {e}"))?;
+    }
 
     // 1. 双侧清单 + 客户端基线（上轮结束时服务器的 hash 快照）
     let server_manifest = fetch_manifest(&c, &url, &profile.token)?;
@@ -732,6 +763,83 @@ mod tests {
         let empty = Arc::new(AppState::default());
         let profile2 = ServerProfile { id: "s".into(), name: "x".into(), url: base, token };
         assert!(sync_round(&empty, &profile2).is_err());
+    }
+
+    #[test]
+    fn sync_creates_parent_dirs_and_preserves_asset_names() {
+        // 回归（真机验收发现）：对端「空库」没有父目录 / 附件不是内容寻址名
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        // 手机端只有一篇根目录笔记；桌面端有「目录/笔记」和「assets/人名.png」
+        let phone_note = note_create_op(&phone, "", "手机笔记").unwrap();
+        note_write_op(&phone, &phone_note.path, "手机内容").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+
+        let (desk_dir, desk) = client_vault();
+        let folder = crate::commands::folder_create_op(&desk, "", "工作").unwrap();
+        let desk_note = note_create_op(&desk, &folder.path, "会议纪要").unwrap();
+        note_write_op(&desk, &desk_note.path, "# 纪要\n\n内容").unwrap();
+        let asset_path = "assets/示例图片.png";
+        std::fs::create_dir_all(desk_dir.path().join("assets")).unwrap();
+        std::fs::write(desk_dir.path().join(asset_path), "fake-png-数据".as_bytes()).unwrap();
+        // 非 UTF-8 的 .md（如 GBK 编码的外来文件）也必须能同步（hash 按字节）
+        let foreign = "工作/GBK笔记.md";
+        std::fs::write(desk_dir.path().join(foreign), [0xC4, 0xE3, 0xBA, 0xC3]).unwrap();
+
+        let (token, _) = pair(&base, &code).unwrap();
+        let profile = ServerProfile { id: "s1".into(), name: "phone".into(), url: base.clone(), token: token.clone() };
+
+        let r = sync_round(&desk, &profile).unwrap();
+        assert!(r.errors.is_empty(), "应无错误: {:?}", r.errors);
+        // 推送：工作/会议纪要.md + GBK笔记.md + 附件（+ 根目录无重名文件）
+        assert_eq!(r.pushed.len(), 3, "推送 3 个: {r:?}");
+        assert_eq!(r.pulled.len(), 1, "拉取手机笔记: {r:?}");
+
+        // 服务器侧：父目录被创建、附件保留人名、GBK 文件字节原样
+        assert_eq!(std::fs::read_to_string(phone_dir.path().join(&desk_note.path)).unwrap(), "# 纪要\n\n内容");
+        assert_eq!(std::fs::read(phone_dir.path().join(asset_path)).unwrap(), "fake-png-数据".as_bytes().to_vec());
+        assert_eq!(std::fs::read(phone_dir.path().join(foreign)).unwrap(), vec![0xC4, 0xE3, 0xBA, 0xC3]);
+
+        // 服务器 manifest 与 pull 字节一致（修复1+2：磁盘真相）
+        let c = client();
+        let manifest = fetch_manifest(&c, &base, &token).unwrap();
+        let asset_meta = manifest.iter().find(|m| m.path == asset_path).unwrap();
+        let served = std::fs::read(phone_dir.path().join(asset_path)).unwrap();
+        assert_eq!(asset_meta.hash, crate::fs_ops::content_hash(&served));
+
+        // 终态：再跑一轮全跳过
+        let r2 = sync_round(&desk, &profile).unwrap();
+        assert!(r2.pulled.is_empty() && r2.pushed.is_empty() && r2.conflicts.is_empty(), "{r2:?}");
+        assert_eq!(r2.skipped, 4);
+    }
+
+    #[test]
+    fn manifest_reflects_external_disk_changes() {
+        // 回归（真机验收发现）：磁盘被外部改动后（DB 未更新），manifest 必须反映磁盘
+        let phone_dir = tempfile::TempDir::new().unwrap();
+        let phone = Arc::new(AppState::default());
+        open_vault_at(&phone, phone_dir.path()).unwrap();
+        let note = note_create_op(&phone, "", "外部改动").unwrap();
+        note_write_op(&phone, &note.path, "初始内容").unwrap();
+        let (base, code) = start_phone_server(phone_dir.path(), Arc::clone(&phone));
+        let (token, _) = pair(&base, &code).unwrap();
+
+        // 外部直接改文件（绕过 write_note，DB 保持旧值）
+        std::fs::write(phone_dir.path().join(&note.path), "外部改过的内容").unwrap();
+
+        let c = client();
+        let manifest = fetch_manifest(&c, &base, &token).unwrap();
+        let meta = manifest.iter().find(|m| m.path == note.path).unwrap();
+        assert_eq!(
+            meta.hash,
+            crate::fs_ops::content_hash("外部改过的内容".as_bytes()),
+            "manifest 必须反映磁盘"
+        );
+        // pull 服务的 hash 与内容一致（客户端校验必过）
+        let (files, missing) = pull_batch(&c, &base, &token, &[note.path.clone()]).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(files[0].hash, crate::fs_ops::content_hash("外部改过的内容".as_bytes()));
     }
 
     #[test]

@@ -11,6 +11,7 @@ import { useVaultStore } from "../stores/vault";
 import type { VaultNode } from "../lib/vault";
 
 interface Props {
+  onNavigate?: () => void;
   tree: VaultNode[];
 }
 
@@ -94,7 +95,7 @@ function MenuItem({
 }
 
 /** 目录树：扁平渲染（深度 = 路径段数），hover 显示操作，支持内联重命名与右键菜单 */
-export function TreeView({ tree }: Props) {
+export function TreeView({ tree, onNavigate }: Props) {
   const activePath = useVaultStore((s) => s.activePath);
   const favorites = useVaultStore((s) => s.favorites);
   const renamingPath = useVaultStore((s) => s.renamingPath);
@@ -172,7 +173,10 @@ export function TreeView({ tree }: Props) {
               }`}
               style={{ paddingLeft: depth * 14 + 8 }}
               onClick={() => {
-                if (isNote && !isRenaming) void openNote(node.path);
+                if (isNote && !isRenaming) {
+                  void openNote(node.path);
+                  onNavigate?.();
+                }
               }}
               onContextMenu={(e) => openMenu(e, node)}
             >

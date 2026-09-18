@@ -42,7 +42,7 @@ function MetaList({
   );
 }
 
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const {
     tree,
     vaultPath,
@@ -64,6 +64,12 @@ export function Sidebar() {
     const t = setTimeout(() => void doSearch(q), 250);
     return () => clearTimeout(t);
   }, [q, doSearch]);
+
+  /** 窄屏抽屉模式：打开笔记后收起侧栏 */
+  const openNoteAndClose = (path: string) => {
+    void openNote(path);
+    onNavigate?.();
+  };
 
   return (
     <aside className="flex w-72 shrink-0 flex-col border-r border-line bg-side">
@@ -110,9 +116,8 @@ export function Sidebar() {
               <li key={r.path}>
                 <button
                   onClick={() => {
-                    void openNote(r.path);
+                    openNoteAndClose(r.path);
                     setQ("");
-                    doSearch("");
                   }}
                   className="w-full rounded-lg px-2.5 py-2 text-left hover:bg-canvas"
                 >
@@ -133,11 +138,11 @@ export function Sidebar() {
           <>
             {/* 收藏 */}
             <SectionLabel>收藏</SectionLabel>
-            <MetaList items={favorites} starred onOpen={(p) => void openNote(p)} />
+            <MetaList items={favorites} starred onOpen={openNoteAndClose} />
 
             {/* 最近 */}
             <SectionLabel>最近</SectionLabel>
-            <MetaList items={recents} onOpen={(p) => void openNote(p)} />
+            <MetaList items={recents} onOpen={openNoteAndClose} />
 
             {/* 笔记本树：新建入口统一在标题右侧（交互修正，见 design/direction-approved.md） */}
             <div className="mb-1 mt-4 flex items-center justify-between pl-3 pr-1">
@@ -161,7 +166,7 @@ export function Sidebar() {
                 </button>
               </span>
             </div>
-            <TreeView tree={tree} />
+            <TreeView tree={tree} onNavigate={onNavigate} />
           </>
         )}
       </div>

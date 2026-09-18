@@ -46,3 +46,8 @@ strip = true
 [dev-dependencies]
 base64 = "0.23.1"
 tempfile = "3.27.0"
+
+# tauri#15671：移动端零窗口时 Resumed 事件被丢弃 → FGS 保活进程重开白屏。
+# 上游修复未发布，本地补丁透传 Resumed 到 App 层（配合 lib.rs 的窗口重建）。
+[patch.crates-io]
+tauri-runtime-wry = { path = "../.cache/patches/tauri-runtime-wry" }

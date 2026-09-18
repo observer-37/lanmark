@@ -1,9 +1,20 @@
-import { useEffect } from "react";
-import { TriangleAlert, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Menu, TriangleAlert, X } from "lucide-react";
 import { useVaultStore } from "./stores/vault";
 import { VaultPicker } from "./components/VaultPicker";
 import { Sidebar } from "./components/Sidebar";
 import { EditorPane } from "./components/EditorPane";
+
+/** 窄屏（手机竖屏）判定：侧栏改为覆盖式抽屉，编辑器占满全宽 */
+function useIsNarrow() {
+  const [narrow, setNarrow] = useState(() => window.innerWidth < 768);
+  useEffect(() => {
+    const onResize = () => setNarrow(window.innerWidth < 768);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return narrow;
+}
 
 function Toast() {
   const error = useVaultStore((s) => s.error);
@@ -34,6 +45,8 @@ function Toast() {
 
 function App() {
   const status = useVaultStore((s) => s.status);
+  const narrow = useIsNarrow();
+  const [navOpen, setNavOpen] = useState(false);
 
   useEffect(() => {
     void useVaultStore.getState().init();
@@ -62,9 +75,41 @@ function App() {
 
   return (
     <>
-      <div className="flex h-screen bg-canvas text-ink">
-        <Sidebar />
-        <EditorPane />
+      <div className="relative flex h-screen bg-canvas text-ink">
+        {narrow ? (
+          <>
+            {/* 窄屏：侧栏为覆盖式抽屉 */}
+            {navOpen && (
+              <div
+                className="fixed inset-0 z-30 bg-black/40"
+                onClick={() => setNavOpen(false)}
+              />
+            )}
+            <div
+              className={`fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 ${
+                navOpen ? "translate-x-0" : "-translate-x-full"
+              }`}
+            >
+              <Sidebar onNavigate={() => setNavOpen(false)} />
+            </div>
+            {/* 悬浮抽屉按钮 */}
+            <button
+              aria-label="打开侧栏"
+              onClick={() => setNavOpen(true)}
+              className="fixed left-3 top-3 z-20 rounded-lg border border-line bg-card p-2 text-ink-2 shadow-card"
+            >
+              <Menu size={16} />
+            </button>
+            <div className="min-w-0 flex-1">
+              <EditorPane />
+            </div>
+          </>
+        ) : (
+          <>
+            <Sidebar />
+            <EditorPane />
+          </>
+        )}
       </div>
       <Toast />
     </>

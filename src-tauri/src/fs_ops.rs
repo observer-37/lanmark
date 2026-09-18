@@ -341,6 +341,28 @@ pub fn write_note(
     Ok((mtime, hash))
 }
 
+/// 字节级写入（非 UTF-8 外来文件保真），tmp+rename 原子落盘 + 索引（body 为 lossy 文本）。
+/// 返回 (mtime_ms, hash)。
+pub fn write_note_bytes(
+    vault: &Path,
+    rel_path: &str,
+    bytes: &[u8],
+    conn: &Connection,
+) -> std::io::Result<(i64, String)> {
+    let abs = safe_join(vault, rel_path)?;
+    let tmp = abs.with_extension("md.lanmark-tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, &abs)?;
+    let mtime = now_ms();
+    let hash = content_hash(bytes);
+    let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let title = extract_frontmatter_title(&String::from_utf8_lossy(bytes))
+        .unwrap_or_else(|| title_from_stem(&name));
+    db::upsert_file(conn, rel_path, &title, &String::from_utf8_lossy(bytes), mtime, &hash, true)
+        .map_err(|e| std::io::Error::other(e))?;
+    Ok((mtime, hash))
+}
+
 /// 附件：内容落盘 assets/<sha256前16位>.<ext>，返回相对路径
 pub fn save_asset(vault: &Path, bytes: &[u8], ext: &str) -> std::io::Result<String> {
     let ext = {

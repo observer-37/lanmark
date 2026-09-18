@@ -101,10 +101,29 @@ pub fn local_manifest(state: &Arc<AppState>) -> Result<Vec<FileMeta>, String> {
                     .map_err(|e| e.to_string())?;
                 list
             };
-            for (path, hash, mtime_ms) in rows {
+            for (path, _hash, _mtime) in rows {
+                // 磁盘是唯一事实源：DB 的 hash/body 只服务搜索，可能因外部改动
+                // （其他 App/编辑器直接改文件）与磁盘脱节——同步清单必须以磁盘为准
                 let abs = vault.join(&path);
-                let size = std::fs::metadata(&abs).map(|m| m.len() as i64).unwrap_or(0);
-                out.push(FileMeta { path, kind: "note".into(), hash, mtime_ms, size });
+                let Ok(bytes) = std::fs::read(&abs) else { continue };
+                let (mtime_ms, size) = match std::fs::metadata(&abs) {
+                    Ok(m) => (
+                        m.modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0),
+                        m.len() as i64,
+                    ),
+                    Err(_) => (0, 0),
+                };
+                out.push(FileMeta {
+                    path,
+                    kind: "note".into(),
+                    hash: fs_ops::content_hash(&bytes),
+                    mtime_ms,
+                    size,
+                });
             }
             Ok(())
         })?;
