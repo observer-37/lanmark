@@ -34,15 +34,13 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build
-      - name: 打包原生二进制（AppImage 有 Intel Arc 兼容性问题，原生二进制更稳）
+      # 只发原生二进制（AppImage 有 Intel Arc 兼容性问题）；deb/AppImage 不进 release（2026-09-18 定）
+      - run: pnpm tauri build --no-bundle
+      - name: 打包原生二进制
         run: tar -czf lanmark-linux-x64.tar.gz -C src-tauri/target/release lanmark
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/appimage/*.AppImage
-            lanmark-linux-x64.tar.gz
+          files: lanmark-linux-x64.tar.gz
           fail_on_unmatched_files: true
 
   desktop-windows:
@@ -61,12 +59,11 @@ jobs:
         with:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build
+      # 只发 NSIS 安装包；msi 不进 release（2026-09-18 定）
+      - run: pnpm tauri build --bundles nsis
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+          files: src-tauri/target/release/bundle/nsis/*.exe
           fail_on_unmatched_files: true
 
   android:

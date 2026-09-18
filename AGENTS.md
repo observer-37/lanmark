@@ -27,6 +27,12 @@ Tauri 2 + React 19 + TS + Tailwind v4 + Zustand，一套 Rust core 跑三端。
 - 端到端自测：`scripts/make-demo-vault.sh` 生成 `~/lanmark-demo-vault`（中文/图片/frontmatter + 验收清单），首启页「打开现有笔记库」指向它
 - 桌面 release 用 `scripts/lanmark-desktop.sh`（原生二进制；AppImage 有 Intel Arc 兼容性问题）
 
+## 发版（v0.1 起）
+
+- **只发三件产物**：Linux `lanmark-linux-x64.tar.gz`（原生二进制）/ Windows `*-setup.exe`（NSIS）/ Android `*-aarch64.apk`。deb/AppImage/msi 不进 release（2026-09-18 用户定，避免多余产物），`release.yml` 里 Linux 用 `--no-bundle`、Windows 用 `--bundles nsis` 对应这个约定
+- 流程：改三处版本号（`package.json` / `src-tauri/Cargo.toml` / `tauri.conf.json`）→ 提交推送 → **先** `gh release create vX.Y.Z --title … --notes-file …` 建 release 说明 → `git tag vX.Y.Z && git push origin vX.Y.Z` → `.github/workflows/release.yml` 自动三端构建并附产物
+- 坑：仓库默认 GITHUB_TOKEN 只读，`release.yml` 的 `permissions: contents: write` 不能删（缺了上传 403）
+
 ## 硬约定
 
 1. **工具链与缓存一律进仓库 `.cache/`**（pnpm store/cargo/JDK/SDK/gradle），不污染 `$HOME`；新增缓存照此办（env.sh 已处理，别绕过）。
