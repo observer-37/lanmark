@@ -169,11 +169,17 @@ pub fn title_from_stem(filename: &str) -> String {
         .unwrap_or_else(|| filename.to_string())
 }
 
-/// 目标已存在时自动追加 -2、-3…
-fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
+/// 目标已存在时自动追加 -2、-3…。
+/// 上限耗尽返回 Err 而非 panic：此前 unreachable! 在持 db+vault 双锁路径上
+/// panic → 锁中毒，之后所有 IPC 恒报「锁中毒」（release 下 panic=abort 直接杀进程）
+fn unique_target(dir: &Path, file_name: &str) -> std::io::Result<PathBuf> {
+    unique_target_with_cap(dir, file_name, 10000)
+}
+
+fn unique_target_with_cap(dir: &Path, file_name: &str, cap: u32) -> std::io::Result<PathBuf> {
     let candidate = dir.join(file_name);
     if !candidate.exists() {
-        return candidate;
+        return Ok(candidate);
     }
     let stem = Path::new(file_name)
         .file_stem()
@@ -183,13 +189,16 @@ fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
-    for i in 2..10000 {
+    for i in 2..=cap {
         let candidate = dir.join(format!("{stem}-{i}{ext}"));
         if !candidate.exists() {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    unreachable!("too many duplicates");
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("同名目标过多，无法生成唯一名: {file_name}"),
+    ))
 }
 
 /// 解析出「目标目录 + 规范化后的名字」，供 create/rename 复用
@@ -232,7 +241,7 @@ fn is_windows_reserved_base(name: &str) -> bool {
 pub fn create_note(vault: &Path, dir_rel: &str, raw_name: &str) -> std::io::Result<Node> {
     let (dir, name) = resolve_target(vault, dir_rel, raw_name)?;
     let name = if name.ends_with(".md") { name } else { format!("{name}.md") };
-    let target = unique_target(&dir, &name);
+    let target = unique_target(&dir, &name)?;
     fs::write(&target, "")?;
     let rel = rel_to_string(target.strip_prefix(vault).unwrap());
     Ok(Node {
@@ -245,7 +254,7 @@ pub fn create_note(vault: &Path, dir_rel: &str, raw_name: &str) -> std::io::Resu
 
 pub fn create_folder(vault: &Path, dir_rel: &str, raw_name: &str) -> std::io::Result<Node> {
     let (dir, name) = resolve_target(vault, dir_rel, raw_name)?;
-    let target = unique_target(&dir, &name);
+    let target = unique_target(&dir, &name)?;
     fs::create_dir(&target)?;
     let rel = rel_to_string(target.strip_prefix(vault).unwrap());
     Ok(Node { path: rel, kind: "folder".into(), name, title: None })
@@ -282,7 +291,7 @@ pub fn rename_entry(
     if new_name == old_name {
         return Ok(rel_path.to_string());
     }
-    let target = unique_target(&parent, &new_name);
+    let target = unique_target(&parent, &new_name)?;
     fs::rename(&old_abs, &target)?;
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     db::rename_paths(conn, rel_path, &new_rel)
@@ -336,7 +345,7 @@ pub fn move_entry(
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    let target = unique_target(&new_dir, &name);
+    let target = unique_target(&new_dir, &name)?;
     fs::rename(&old_abs, &target)?;
     let new_rel = rel_to_string(target.strip_prefix(vault).unwrap());
     db::rename_paths(conn, rel_path, &new_rel)
@@ -615,6 +624,23 @@ mod tests {
         assert!(vault.join("b/a/n.md").exists());
         assert!(db::get_file(&conn, "b/a/n.md").unwrap().is_some());
         assert!(db::get_file(&conn, "a/n.md").unwrap().is_none());
+    }
+
+    /// 回归：同名目标耗尽上限必须返回 Err（此前 unreachable! panic 会
+    /// 中毒 db+vault 双锁，之后所有 IPC 恒报「锁中毒」；release 下直接杀进程）
+    #[test]
+    fn unique_target_exhaustion_returns_err_not_panic() {
+        let (tmp, _conn) = setup();
+        let dir = tmp.path();
+        fs::write(dir.join("x.md"), "").unwrap();
+        fs::write(dir.join("x-2.md"), "").unwrap();
+        // cap=2 → 2..=2 全占用 → Err
+        let r = unique_target_with_cap(dir, "x.md", 2);
+        assert!(r.is_err());
+        assert!(r.as_ref().unwrap_err().kind() == std::io::ErrorKind::AlreadyExists);
+        // 正常去重仍工作
+        let t = unique_target_with_cap(dir, "x.md", 100).unwrap();
+        assert!(t.to_string_lossy().ends_with("x-3.md"));
     }
 
     /// 回归：移到「当前所在目录」必须是无操作。
