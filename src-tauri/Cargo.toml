@@ -49,5 +49,7 @@ tempfile = "3.27.0"
 
 # tauri#15671：移动端零窗口时 Resumed 事件被丢弃 → FGS 保活进程重开白屏。
 # 上游修复未发布，本地补丁透传 Resumed 到 App 层（配合 lib.rs 的窗口重建）。
+# 补丁是上游 2.11.4 的 vendor 副本，仅 src/lib.rs 有 7 行差异（见 patches/README.md）；
+# 路径必须入库——.cache/ 被 gitignore，放那里的话 CI 全新 checkout 会三端全挂。
 [patch.crates-io]
-tauri-runtime-wry = { path = "../.cache/patches/tauri-runtime-wry" }
+tauri-runtime-wry = { path = "../patches/tauri-runtime-wry" }
