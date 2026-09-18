@@ -78,7 +78,7 @@ function App() {
       <div className="relative flex h-screen bg-canvas text-ink">
         {narrow ? (
           <>
-            {/* 窄屏：侧栏为覆盖式抽屉 */}
+            {/* 窄屏：侧栏为覆盖式抽屉（flex 让 aside 拉满高度，内部列表才能滚动） */}
             {navOpen && (
               <div
                 className="fixed inset-0 z-30 bg-black/40"
@@ -86,13 +86,13 @@ function App() {
               />
             )}
             <div
-              className={`fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 ${
+              className={`fixed inset-y-0 left-0 z-40 flex transform transition-transform duration-200 ${
                 navOpen ? "translate-x-0" : "-translate-x-full"
               }`}
             >
               <Sidebar onNavigate={() => setNavOpen(false)} />
             </div>
-            {/* 悬浮抽屉按钮 */}
+            {/* 悬浮抽屉按钮：占据头部左侧 ~56px，EditorPane 窄屏头部需让出该宽度 */}
             <button
               aria-label="打开侧栏"
               onClick={() => setNavOpen(true)}
@@ -100,8 +100,9 @@ function App() {
             >
               <Menu size={16} />
             </button>
-            <div className="min-w-0 flex-1">
-              <EditorPane />
+            {/* flex-col 接续高度链：让 EditorPane 的 flex-1 生效，编辑卡占满剩余高度 */}
+            <div className="flex min-w-0 flex-1 flex-col">
+              <EditorPane narrow={narrow} />
             </div>
           </>
         ) : (

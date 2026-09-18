@@ -215,7 +215,7 @@ function ModeButton({
   );
 }
 
-export function EditorPane() {
+export function EditorPane({ narrow = false }: { narrow?: boolean }) {
   const {
     activePath,
     content,
@@ -251,8 +251,12 @@ export function EditorPane() {
 
   return (
     <main className="flex min-w-0 flex-1 flex-col bg-canvas">
-      {/* 头部 */}
-      <div className="flex items-center gap-2 px-4 py-2.5">
+      {/* 头部：窄屏时左侧让出悬浮抽屉按钮的宽度（按钮占 12→46px），避免遮挡标题 */}
+      <div
+        className={`flex items-center gap-2 py-2.5 ${
+          narrow ? "pl-14 pr-2" : "px-4"
+        }`}
+      >
         <div
           className="flex min-w-0 flex-1 items-center gap-1 truncate text-xs text-ink-3"
           title={activePath}
@@ -277,7 +281,7 @@ export function EditorPane() {
             <span className="h-1.5 w-1.5 rounded-full bg-warn" />
             未保存…
           </span>
-        ) : savedAt ? (
+        ) : savedAt && !narrow ? ( /* 窄屏头部拥挤，保存时刻省略，保留未保存警示 */
           <span className="flex shrink-0 items-center gap-1 text-[11px] text-ink-2">
             <Check size={12} className="text-ok" />
             已保存 {new Date(savedAt).toLocaleTimeString()}
