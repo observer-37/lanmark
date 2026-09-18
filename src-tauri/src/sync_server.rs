@@ -109,9 +109,25 @@ fn gen_token(code: &str) -> String {
 pub struct ServerCtx {
     pub app: Arc<AppState>,
     pub cfg: Mutex<SyncConfig>,
+    /// /pair 爆破保护：连续失败计数 + 锁定截止时间
+    pub pair_guard: Mutex<PairGuard>,
 }
 
+#[derive(Default)]
+struct PairGuard {
+    failures: u32,
+    locked_until: Option<std::time::Instant>,
+}
+
+/// 8 位数字配对码仅 10^8 组合，LAN 内可被脚本穷尽 → 失败退避锁定
+const PAIR_MAX_FAILURES: u32 = 10;
+const PAIR_LOCK_SECS: u64 = 60;
+
 impl ServerCtx {
+    pub fn new(app: Arc<AppState>, cfg: SyncConfig) -> Self {
+        Self { app, cfg: Mutex::new(cfg), pair_guard: Mutex::new(PairGuard::default()) }
+    }
+
     fn vault(&self) -> Result<PathBuf, String> {
         self.app
             .vault
@@ -136,13 +152,22 @@ impl ServerCtx {
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?
             .tokens
             .iter()
-            .any(|t| t == token);
+            .any(|t| const_eq(t, token));
         if ok {
             Ok(())
         } else {
             Err((StatusCode::FORBIDDEN, "token 无效（服务器可能重启过，重新配对）".into()))
         }
     }
+}
+
+/// 常量时间字符串比较（token 校验，避免时序侧信道）
+fn const_eq(a: &str, b: &str) -> bool {
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    if x.len() != y.len() {
+        return false;
+    }
+    x.iter().zip(y).fold(0u8, |acc, (p, q)| acc | (p ^ q)) == 0
 }
 
 // ---------- 端点 ----------
@@ -172,13 +197,43 @@ struct PairBody {
 }
 
 /// POST /api/v1/pair —— 配对码换 token（token 持久化，服务器重启后仍有效）
+/// 爆破保护：连续 PAIR_MAX_FAILURES 次失败 → 锁定 PAIR_LOCK_SECS 秒
 async fn pair(
     State(ctx): State<Arc<ServerCtx>>,
     Json(body): Json<PairBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // 锁定检查（guard 锁单独持有，不与 cfg 锁叠加）
+    {
+        let guard = ctx
+            .pair_guard
+            .lock()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
+        if let Some(until) = guard.locked_until {
+            if let Some(rem) = until.checked_duration_since(std::time::Instant::now()) {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!("配对尝试过于频繁，{} 后重试", rem.as_secs()),
+                ));
+            }
+        }
+    }
+
     let mut cfg = ctx.cfg.lock().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
     if body.code.trim() != cfg.pairing_code {
+        let mut guard = ctx.pair_guard.lock().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "配置锁中毒".into()))?;
+        guard.failures += 1;
+        if guard.failures >= PAIR_MAX_FAILURES {
+            guard.locked_until = Some(
+                std::time::Instant::now() + std::time::Duration::from_secs(PAIR_LOCK_SECS),
+            );
+            guard.failures = 0;
+        }
         return Err((StatusCode::FORBIDDEN, "配对码错误".into()));
+    }
+    // 成功：复位失败计数
+    if let Ok(mut g) = ctx.pair_guard.lock() {
+        g.failures = 0;
+        g.locked_until = None;
     }
     let token = gen_token(&cfg.pairing_code);
     cfg.tokens.push(token.clone());
@@ -459,7 +514,7 @@ pub fn spawn(app: Arc<AppState>) -> Result<u16, String> {
         .clone()
         .ok_or("尚未打开 vault")?;
     let cfg = load_sync_config(&vault);
-    let ctx = Arc::new(ServerCtx { app, cfg: Mutex::new(cfg) });
+    let ctx = Arc::new(ServerCtx::new(app, cfg));
 
     // mDNS 广播（best effort；Android 需 multicast lock，失败不阻断服务器）
     let mdns_name = {
@@ -592,7 +647,7 @@ pub(crate) mod test_util {
         let (port, listener) = bind_listener().unwrap();
         let cfg = load_sync_config(phone_vault);
         let code = cfg.pairing_code.clone();
-        let ctx = Arc::new(ServerCtx { app, cfg: Mutex::new(cfg) });
+        let ctx = Arc::new(ServerCtx::new(app, cfg));
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -617,6 +672,47 @@ mod tests {
         assert_eq!(a.len(), 8);
         assert!(a.chars().all(|c| c.is_ascii_digit()));
         assert_ne!(a, b, "连续两次生成应不同");
+    }
+
+    /// 回归：/pair 爆破保护——连续失败 PAIR_MAX_FAILURES 次后锁定，
+    /// 期间连正确码也拒绝（429）。8 位数字码仅 10^8 组合，
+    /// LAN 内脚本数小时可穷尽，无退避 = 同步体系裸奔
+    #[test]
+    fn const_eq_semantics() {
+        assert!(const_eq("abc", "abc"));
+        assert!(const_eq("", ""));
+        assert!(!const_eq("abc", "abd"));
+        assert!(!const_eq("abc", "ab"));
+        assert!(!const_eq("a", ""));
+    }
+
+    #[test]
+    fn pair_locks_after_repeated_failures() {
+        use crate::commands::open_vault_at;
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = Arc::new(AppState::default());
+        open_vault_at(&app, dir.path()).unwrap();
+        let (base, code) = test_util::start_phone_server(dir.path(), app);
+        let client = reqwest::blocking::Client::new();
+        wait_ready(&client, &base);
+
+        for i in 0..PAIR_MAX_FAILURES {
+            let r = client
+                .post(format!("{base}/api/v1/pair"))
+                .json(&json!({ "code": "00000000" }))
+                .send()
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "第 {i} 次应为 403");
+        }
+        // 锁定：连正确码也 429
+        let r = client
+            .post(format!("{base}/api/v1/pair"))
+            .json(&json!({ "code": code }))
+            .send()
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = r.text().unwrap();
+        assert!(body.contains("后重试"), "{body}");
     }
 
     #[test]
