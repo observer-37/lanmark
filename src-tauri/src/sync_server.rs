@@ -281,6 +281,11 @@ fn write_pushed_file(
     vault: &std::path::Path,
     pf: &PushFile,
 ) -> Result<Option<String>, String> {
+    // 点目录（.lanmark/ 等）禁止写入：否则远程可写 .lanmark/evil.md 进索引
+    // 并每回合重复拉取，或污染元数据目录
+    if has_dot_segment(&pf.path) {
+        return Err("点目录路径禁止同步".into());
+    }
     let bytes = b64_decode(&pf.content_base64)?;
     // 内容完整性：hash 必须与内容一致
     let actual_hash = fs_ops::content_hash(&bytes);
@@ -354,6 +359,11 @@ fn write_pushed_file(
     }
 }
 
+/// 路径任一段以 `.` 开头（.lanmark、.obsidian…）
+fn has_dot_segment(path: &str) -> bool {
+    path.split('/').any(|seg| seg.starts_with('.'))
+}
+
 #[derive(Deserialize)]
 struct DeleteBody {
     paths: Vec<String>,
@@ -368,6 +378,17 @@ async fn delete_files(
     ctx.check_token(&headers)?;
     let mut results = Vec::new();
     for path in &body.paths {
+        // 点目录禁止删除：.lanmark/lanmark.db（索引事实）与 sync.json（全体凭据）
+        // 被删 = 同步体系自我 DoS
+        if has_dot_segment(path) {
+            results.push(PushResult {
+                path: path.clone(),
+                ok: false,
+                error: Some("点目录路径禁止删除".into()),
+                conflict_saved_as: None,
+            });
+            continue;
+        }
         match commands::entry_delete_op(&ctx.app, path) {
             Ok(trash) => results.push(PushResult {
                 path: path.clone(),
@@ -790,6 +811,39 @@ mod tests {
         assert!(deleted[0].ok);
         assert!(deleted[0].conflict_saved_as.as_deref().unwrap().starts_with(".lanmark/trash/"));
         assert!(!dir.path().join(&note.path).exists());
+
+        // 11. 点目录保护：push .lanmark/evil.md 拒绝（否则进索引并每回合重复拉取）
+        let pushed4: Vec<PushResult> = client
+            .post(format!("{base}/api/v1/push"))
+            .header("authorization", &auth)
+            .json(&json!({
+                "files": [{
+                    "path": ".lanmark/evil.md",
+                    "kind": "note",
+                    "contentBase64": b64_encode(b"# evil"),
+                    "hash": fs_ops::content_hash(b"# evil"),
+                    "mtimeMs": 1,
+                    "baseHash": "",
+                }]
+            }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert!(!pushed4[0].ok, "点目录 push 必须拒绝");
+        assert!(!dir.path().join(".lanmark/evil.md").exists());
+
+        // 12. 点目录保护：delete .lanmark/lanmark.db / sync.json 拒绝（自我 DoS）
+        let deleted2: Vec<PushResult> = client
+            .post(format!("{base}/api/v1/delete"))
+            .header("authorization", &auth)
+            .json(&json!({ "paths": [".lanmark/lanmark.db", ".lanmark/sync.json"] }))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert!(!deleted2[0].ok && !deleted2[1].ok, "点目录 delete 必须拒绝");
+        assert!(dir.path().join(".lanmark/lanmark.db").exists(), "索引库必须还在");
     }
 
     /// 等服务器就绪（最多 2s）

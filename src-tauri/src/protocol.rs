@@ -18,6 +18,11 @@ pub fn resolve(state: &Arc<AppState>, raw_path: &str) -> Option<(String, Vec<u8>
     if rel.is_empty() {
         return None;
     }
+    // 点目录禁止服务：.lanmark/lanmark.db 含全部正文缓存，
+    // .lanmark/sync.json 含配对码与全部 token——webview 内任何 JS 可 fetch
+    if rel.split('/').any(|seg| seg.starts_with('.')) {
+        return None;
+    }
     let vault = state.vault.lock().ok()?.as_ref().cloned()?;
     // resolve_in_vault = safe_join + 符号链接逃逸校验（链接指向 vault 外 → 404）
     let abs = crate::fs_ops::resolve_in_vault(Path::new(&vault), &rel).ok()?;
@@ -114,6 +119,18 @@ mod tests {
         assert!(resolve(&state, "/../outside").is_none());
         assert!(resolve(&state, "/").is_none());
         assert!(resolve(&state, "").is_none());
+    }
+
+    /// 回归：点目录（.lanmark/）禁止服务——索引库含全部正文缓存，
+    /// sync.json 含配对码与全部 token
+    #[test]
+    fn resolve_rejects_dot_directories() {
+        let (_dir, state) = vault_with_files();
+        // open_vault_at 已创建 .lanmark/lanmark.db，确认文件存在再断言 404
+        assert!(state.db.lock().unwrap().is_some());
+        assert!(resolve(&state, "/.lanmark/lanmark.db").is_none());
+        assert!(resolve(&state, "/.lanmark/sync.json").is_none());
+        assert!(resolve(&state, "/.obsidian/x").is_none());
     }
 
     #[test]
